@@ -305,16 +305,7 @@ def get_btc_direction():
 
 # ── 메인 루프
 def main():
-    logging.info(f"텔레그램 신호 봇 시작 — TOKEN={'설정됨' if TOKEN else '❌미설정'} CHAT_ID={CHAT_ID or '❌미설정'}")
-    if not TOKEN or not CHAT_ID:
-        logging.error("TELEGRAM_BOT_TOKEN 또는 TELEGRAM_CHAT_ID 환경변수 없음 — 텔레그램 알림 비활성")
-    else:
-        resp = requests.post(
-            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-            json={"chat_id": CHAT_ID, "text": "✅ *단타 신호 봇 시작*\nBTC · ETH 실시간 모니터링 중 (60초 주기)", "parse_mode": "Markdown"},
-            timeout=10,
-        )
-        logging.info(f"시작 메시지 응답: {resp.status_code} {resp.text[:200]}")
+    logging.info("텔레그램 신호 봇 시작")
 
     last = {"BTC": None, "ETH": None}
 
