@@ -7,11 +7,34 @@ import requests
 import xml.etree.ElementTree as ET
 from scipy.signal import find_peaks
 from datetime import datetime, timezone, timedelta
+import threading
 
 KST = timezone(timedelta(hours=9))
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from streamlit_autorefresh import st_autorefresh
+
+# ── 텔레그램 노티파이어 백그라운드 스레드 (환경변수 공유)
+_notifier_started = False
+_notifier_lock = threading.Lock()
+
+def _start_notifier():
+    try:
+        from notifier import main as notifier_main
+        notifier_main()
+    except Exception as e:
+        import logging
+        logging.error(f"Notifier 스레드 오류: {e}")
+
+def _ensure_notifier():
+    global _notifier_started
+    with _notifier_lock:
+        if not _notifier_started:
+            _notifier_started = True
+            t = threading.Thread(target=_start_notifier, daemon=True)
+            t.start()
+
+_ensure_notifier()
 
 # ══════════════════════════════════════════════
 # 페이지 설정
