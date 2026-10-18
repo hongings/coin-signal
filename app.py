@@ -1498,6 +1498,13 @@ def scalp_decision_engine(df_4h, df_1h, df_15m, df_5m, funding_rate, btc_directi
             reason = "고변동성 — 손절 폭 계산 불안정. 변동성 완화 후 진입"
         else:
             is_long = trade_direction == "LONG"
+
+            # ── 15분봉 현재 RSI (진입 시점 과열 여부)
+            try:
+                rsi_entry = ta.momentum.RSIIndicator(df_15m["close"].tail(50), window=14).rsi().iloc[-1]
+            except Exception:
+                rsi_entry = 50.0
+
             sr_levels_15m = find_sr_levels(df_15m, price)
             sl, _ = get_atr_stop(df_15m, price, is_long, sr_levels_15m, mult=0.8)
 
@@ -1530,6 +1537,24 @@ def scalp_decision_engine(df_4h, df_1h, df_15m, df_5m, funding_rate, btc_directi
             elif rr1 < 1.5:
                 decision = "NO TRADE"
                 reason = f"손익비 부족 (R:R {rr1:.1f})"
+                sl = tp1 = tp2 = rr1 = rr2 = None
+            elif (momentum["exhausted"] and
+                  momentum["direction"] == ("bull" if is_long else "bear")):
+                # ── 같은 방향 모멘텀 소진 → 추격 금지
+                cnt  = momentum["count"]
+                tf_m = momentum["tf"]
+                dir_kr = "상승" if is_long else "하락"
+                decision = "NO TRADE"
+                reason = (f"모멘텀 소진 — {tf_m} {dir_kr} {cnt}연속 후 추격 금지 "
+                          f"(이미 과진행, 반전 위험)")
+                sl = tp1 = tp2 = rr1 = rr2 = None
+            elif is_long and rsi_entry > 70:
+                decision = "NO TRADE"
+                reason = f"RSI 과매수 ({rsi_entry:.0f}) — 고점 추격 금지"
+                sl = tp1 = tp2 = rr1 = rr2 = None
+            elif not is_long and rsi_entry < 30:
+                decision = "NO TRADE"
+                reason = f"RSI 과매도 ({rsi_entry:.0f}) — 저점 추격 금지"
                 sl = tp1 = tp2 = rr1 = rr2 = None
             else:
                 decision = trade_direction
