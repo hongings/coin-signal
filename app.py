@@ -537,16 +537,21 @@ def get_pattern_chart_annotations(df, price, lookback=100):
     if len(troughs) >= 2:
         ta_, tb_ = int(troughs[-2]), int(troughs[-1])
         if tb_ >= recent and abs(l[ta_] - l[tb_]) / max(l[ta_], l[tb_]) <= 0.015:
-            # 넥라인: 두 저점 사이 고점
             mid_peaks = [pk for pk in peaks if ta_ < pk < tb_]
             nk = float(h[mid_peaks[0]]) if mid_peaks else price * 1.015
             target = nk + (nk - min(l[ta_], l[tb_]))
+            mid_pt = (ts[mid_peaks[0]], float(h[mid_peaks[0]])) if mid_peaks else None
+            line_pts = [(ts[ta_], float(l[ta_]))]
+            if mid_pt: line_pts.append(mid_pt)
+            line_pts.append((ts[tb_], float(l[tb_])))
             annotations.append({
                 "name": "더블바텀", "bias": "bull",
                 "pivots": [(ts[ta_], float(l[ta_]), "①"), (ts[tb_], float(l[tb_]), "②")],
                 "neckline": nk, "target": target,
                 "fail": min(l[ta_], l[tb_]) * 0.995,
                 "marker_color": "#5de8a0", "anchor": "bottom center",
+                "zone_start": ts[ta_], "zone_end": ts[tb_],
+                "line_points": line_pts,
             })
 
     # ── 더블탑
@@ -556,12 +561,18 @@ def get_pattern_chart_annotations(df, price, lookback=100):
             mid_trs = [tr for tr in troughs if pa_ < tr < pb_]
             nk = float(l[mid_trs[0]]) if mid_trs else price * 0.985
             target = nk - (max(h[pa_], h[pb_]) - nk)
+            mid_pt = (ts[mid_trs[0]], float(l[mid_trs[0]])) if mid_trs else None
+            line_pts = [(ts[pa_], float(h[pa_]))]
+            if mid_pt: line_pts.append(mid_pt)
+            line_pts.append((ts[pb_], float(h[pb_])))
             annotations.append({
                 "name": "더블탑", "bias": "bear",
                 "pivots": [(ts[pa_], float(h[pa_]), "①"), (ts[pb_], float(h[pb_]), "②")],
                 "neckline": nk, "target": target,
                 "fail": max(h[pa_], h[pb_]) * 1.005,
                 "marker_color": "#e85d5d", "anchor": "top center",
+                "zone_start": ts[pa_], "zone_end": ts[pb_],
+                "line_points": line_pts,
             })
 
     # ── 3드라이브 하락
@@ -575,6 +586,8 @@ def get_pattern_chart_annotations(df, price, lookback=100):
                 "neckline": None, "target": target,
                 "fail": l[t3] * 0.995,
                 "marker_color": "#5de8a0", "anchor": "bottom center",
+                "zone_start": ts[t1], "zone_end": ts[t3],
+                "line_points": [(ts[t1], float(l[t1])), (ts[t2], float(l[t2])), (ts[t3], float(l[t3]))],
             })
 
     # ── 3드라이브 상승
@@ -588,6 +601,8 @@ def get_pattern_chart_annotations(df, price, lookback=100):
                 "neckline": None, "target": target,
                 "fail": h[p3] * 1.005,
                 "marker_color": "#e85d5d", "anchor": "top center",
+                "zone_start": ts[p1], "zone_end": ts[p3],
+                "line_points": [(ts[p1], float(h[p1])), (ts[p2], float(h[p2])), (ts[p3], float(h[p3]))],
             })
 
     # ── 역헤드앤숄더
@@ -603,6 +618,8 @@ def get_pattern_chart_annotations(df, price, lookback=100):
                 "neckline": nk, "target": target,
                 "fail": l[hd] * 0.995,
                 "marker_color": "#5de8a0", "anchor": "bottom center",
+                "zone_start": ts[s1], "zone_end": ts[s2],
+                "line_points": [(ts[s1], float(l[s1])), (ts[hd], float(l[hd])), (ts[s2], float(l[s2]))],
             })
 
     # ── 헤드앤숄더
@@ -618,6 +635,8 @@ def get_pattern_chart_annotations(df, price, lookback=100):
                 "neckline": nk, "target": target,
                 "fail": h[hd] * 1.005,
                 "marker_color": "#e85d5d", "anchor": "top center",
+                "zone_start": ts[s1], "zone_end": ts[s2],
+                "line_points": [(ts[s1], float(h[s1])), (ts[hd], float(h[hd])), (ts[s2], float(h[s2]))],
             })
 
     return annotations[:2]
@@ -724,12 +743,34 @@ def build_chart(df, ema_series, bb_u, bb_l, bb_m,
             annotation_text=f"  {lt} ${lv:,.0f}",
             annotation_font_size=9,annotation_font_color=c,row=1,col=1)
 
-    # ── 패턴 마킹 (피벗 포인트 + 넥라인 + 목표가)
+    # ── 패턴 마킹 (배경 음영 + 연결선 + 피벗 마커 + 넥라인 + 목표가)
     if pattern_annotations:
         for ann in pattern_annotations[:2]:
-            mc = ann["marker_color"]
+            mc  = ann["marker_color"]
             anc = ann["anchor"]
-            # 피벗 포인트 마커
+            is_bull = ann["bias"] == "bull"
+
+            # 1) 배경 음영 — 패턴 구간 강조
+            if ann.get("zone_start") is not None and ann.get("zone_end") is not None:
+                shade = "rgba(0,200,100,0.10)" if is_bull else "rgba(255,80,80,0.10)"
+                fig.add_vrect(
+                    x0=ann["zone_start"], x1=ann["zone_end"],
+                    fillcolor=shade, layer="below", line_width=0,
+                    row=1, col=1,
+                )
+
+            # 2) 피봇 연결선 — 패턴 모양 직접 표현
+            if ann.get("line_points"):
+                lx = [p[0] for p in ann["line_points"]]
+                ly = [p[1] for p in ann["line_points"]]
+                line_col = "#5de8a0" if is_bull else "#e85d5d"
+                fig.add_trace(go.Scatter(
+                    x=lx, y=ly, mode="lines",
+                    line=dict(color=line_col, width=2, dash="solid"),
+                    name=f"{ann['name']} 선", showlegend=False,
+                ), row=1, col=1)
+
+            # 3) 피봇 포인트 마커 (◆)
             px = [p[0] for p in ann["pivots"]]
             py = [p[1] for p in ann["pivots"]]
             pt_labels = [p[2] for p in ann["pivots"]]
@@ -741,15 +782,17 @@ def build_chart(df, ema_series, bb_u, bb_l, bb_m,
                 name=ann["name"], showlegend=True,
                 textfont=dict(color=mc, size=11),
             ), row=1, col=1)
-            # 넥라인
-            if ann["neckline"]:
+
+            # 4) 넥라인
+            if ann.get("neckline"):
                 nk_col = "#e8c85d"
                 fig.add_hline(y=ann["neckline"], line_color=nk_col,
                     line_dash="dashdot", line_width=1.5,
                     annotation_text=f"  넥라인 ${ann['neckline']:,.0f}",
                     annotation_font_color=nk_col, annotation_font_size=9, row=1, col=1)
-            # 목표가
-            if ann["target"]:
+
+            # 5) 목표가
+            if ann.get("target"):
                 tg_col = mc
                 fig.add_hline(y=ann["target"], line_color=tg_col,
                     line_dash="dot", line_width=1,
