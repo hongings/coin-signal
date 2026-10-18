@@ -394,6 +394,165 @@ def get_5m_confirm(df_5m, direction):
     return ok, label
 
 
+def detect_chart_patterns(df_4h, df_1h, df_15m, price):
+    """
+    Multi-timeframe chart pattern detector.
+    Returns list of dicts: {name, tf, desc, bias, level}. Max 3 patterns.
+    """
+    patterns = []
+
+    tf_configs = [
+        (df_4h,  "4H",  80),
+        (df_1h,  "1H",  80),
+        (df_15m, "15m", 100),
+    ]
+
+    for df, tf_name, lookback in tf_configs:
+        if df is None or len(df) < lookback:
+            continue
+
+        h = df["high"].values[-lookback:]
+        l = df["low"].values[-lookback:]
+
+        peaks,   _ = find_peaks(h, distance=5, prominence=h.std() * 0.3)
+        troughs, _ = find_peaks(-l, distance=5, prominence=l.std() * 0.3)
+
+        # Only consider pivots that appear in the last 20-30 bars of the slice
+        recent_cutoff = lookback - 30
+
+        def _recent(idx_arr):
+            return [i for i in idx_arr if i >= recent_cutoff]
+
+        recent_peaks   = _recent(peaks.tolist())
+        recent_troughs = _recent(troughs.tolist())
+
+        # ── 3드라이브 하락 (3 descending troughs → bullish reversal)
+        if len(troughs) >= 3:
+            t1, t2, t3 = troughs[-3], troughs[-2], troughs[-1]
+            if t3 >= recent_cutoff and l[t1] > l[t2] > l[t3]:
+                patterns.append({
+                    "name": "3드라이브 하락",
+                    "tf": tf_name,
+                    "desc": f"3연속 저점 하강 → 강세 반전 가능 (최저 ${l[t3]:,.0f})",
+                    "bias": "bull",
+                    "level": float(l[t3]),
+                })
+
+        # ── 3드라이브 상승 (3 ascending peaks → bearish reversal)
+        if len(peaks) >= 3:
+            p1, p2, p3 = peaks[-3], peaks[-2], peaks[-1]
+            if p3 >= recent_cutoff and h[p1] < h[p2] < h[p3]:
+                patterns.append({
+                    "name": "3드라이브 상승",
+                    "tf": tf_name,
+                    "desc": f"3연속 고점 상승 → 약세 반전 가능 (최고 ${h[p3]:,.0f})",
+                    "bias": "bear",
+                    "level": float(h[p3]),
+                })
+
+        # ── 더블바텀 (2 troughs within 1.5%)
+        if len(troughs) >= 2:
+            ta_, tb_ = troughs[-2], troughs[-1]
+            if tb_ >= recent_cutoff:
+                diff = abs(l[ta_] - l[tb_]) / max(l[ta_], l[tb_])
+                if diff <= 0.015:
+                    avg_lv = (l[ta_] + l[tb_]) / 2
+                    patterns.append({
+                        "name": "더블바텀",
+                        "tf": tf_name,
+                        "desc": f"두 저점 근접 (${avg_lv:,.0f}) → 지지 강화, 강세 신호",
+                        "bias": "bull",
+                        "level": float(avg_lv),
+                    })
+
+        # ── 더블탑 (2 peaks within 1.5%)
+        if len(peaks) >= 2:
+            pa_, pb_ = peaks[-2], peaks[-1]
+            if pb_ >= recent_cutoff:
+                diff = abs(h[pa_] - h[pb_]) / max(h[pa_], h[pb_])
+                if diff <= 0.015:
+                    avg_lv = (h[pa_] + h[pb_]) / 2
+                    patterns.append({
+                        "name": "더블탑",
+                        "tf": tf_name,
+                        "desc": f"두 고점 근접 (${avg_lv:,.0f}) → 저항 강화, 약세 신호",
+                        "bias": "bear",
+                        "level": float(avg_lv),
+                    })
+
+        # ── 역헤드앤숄더 (middle trough is lowest of 3 → bullish)
+        if len(troughs) >= 3:
+            s1, head, s2 = troughs[-3], troughs[-2], troughs[-1]
+            if s2 >= recent_cutoff and l[head] < l[s1] and l[head] < l[s2]:
+                patterns.append({
+                    "name": "역헤드앤숄더",
+                    "tf": tf_name,
+                    "desc": f"역H&S 형성, 헤드 ${l[head]:,.0f} → 강세 반전 신호",
+                    "bias": "bull",
+                    "level": float(l[head]),
+                })
+
+        # ── 헤드앤숄더 (middle peak is highest of 3 → bearish)
+        if len(peaks) >= 3:
+            s1, head, s2 = peaks[-3], peaks[-2], peaks[-1]
+            if s2 >= recent_cutoff and h[head] > h[s1] and h[head] > h[s2]:
+                patterns.append({
+                    "name": "헤드앤숄더",
+                    "tf": tf_name,
+                    "desc": f"H&S 형성, 헤드 ${h[head]:,.0f} → 약세 반전 신호",
+                    "bias": "bear",
+                    "level": float(h[head]),
+                })
+
+    # Deduplicate by name (keep first/higher timeframe occurrence), max 3
+    seen = set()
+    unique = []
+    for p in patterns:
+        if p["name"] not in seen:
+            seen.add(p["name"])
+            unique.append(p)
+        if len(unique) >= 3:
+            break
+
+    return unique
+
+
+def detect_momentum_exhaustion(df_15m, df_5m):
+    """
+    Count consecutive same-direction candles from the last 10 bars.
+    Check 5m first, then 15m. If count >= 4 return exhaustion signal.
+    """
+    empty = {"exhausted": False, "direction": "", "count": 0, "tf": "", "label": ""}
+
+    for df, tf_name in [(df_5m, "5m"), (df_15m, "15m")]:
+        if df is None or len(df) < 5:
+            continue
+        last10 = df.tail(10)
+        candles = [(row["close"] >= row["open"]) for _, row in last10.iterrows()]
+        # Count consecutive from the end
+        last_dir = candles[-1]
+        count = 0
+        for c in reversed(candles):
+            if c == last_dir:
+                count += 1
+            else:
+                break
+        if count >= 4:
+            direction = "bull" if last_dir else "bear"
+            dir_str   = "상승" if last_dir else "하락"
+            opp       = "숏" if last_dir else "롱"
+            label     = f"⚠️ {tf_name} {dir_str} {count}연속 — {opp} 신호 신중"
+            return {
+                "exhausted": True,
+                "direction": direction,
+                "count": count,
+                "tf": tf_name,
+                "label": label,
+            }
+
+    return empty
+
+
 # ══════════════════════════════════════════════
 # 차트
 # ══════════════════════════════════════════════
@@ -726,6 +885,7 @@ def scalp_decision_engine(df_4h, df_1h, df_15m, df_5m, funding_rate, btc_directi
     btc_conflict = False
     btc_conflict_label = ""
     zone_strength_map = {}
+    projected_trade = None
 
     # ── Data freshness check
     last_ts = df_15m["ts"].iloc[-1]
@@ -852,6 +1012,24 @@ def scalp_decision_engine(df_4h, df_1h, df_15m, df_5m, funding_rate, btc_directi
             else:
                 zone_label = f"📍 저항구간 ${zone_price:,.0f} {_strength_dots(zone_strength_map.get(zone_price, 1))}"
 
+    # ── 차트 패턴 감지
+    chart_patterns = detect_chart_patterns(df_4h, df_1h, df_15m, price)
+
+    # ── 모멘텀 소진 감지
+    momentum = detect_momentum_exhaustion(df_15m, df_5m)
+
+    # ── S/R 접근 감지 (0.8%~1.5% 이내)
+    approaching_zone = False
+    approach_price = None
+    approach_type = None
+    for lv, zt, strength in sr_zones:
+        dist = abs(lv - price) / price
+        if 0.008 < dist <= 0.015:
+            approaching_zone = True
+            approach_price = lv
+            approach_type = zt
+            break
+
     # ── Pattern classification
     if zone_type == "지지":
         if direction == "bull":
@@ -907,6 +1085,8 @@ def scalp_decision_engine(df_4h, df_1h, df_15m, df_5m, funding_rate, btc_directi
     steps = [direction_label, structure_label, zone_label, trigger_label]
     if btc_conflict_label:
         steps.append(btc_conflict_label)
+    if momentum["exhausted"]:
+        steps.append(momentum["label"])
 
     # ── Decision logic
     sl = tp1 = tp2 = rr1 = rr2 = invalidation = None
@@ -922,6 +1102,22 @@ def scalp_decision_engine(df_4h, df_1h, df_15m, df_5m, funding_rate, btc_directi
         decision = "WAIT"
         reason = "구간 도달 — 5분봉 반응 확인 대기"
         entry_zone = (zone_price * 0.997, zone_price * 1.003) if zone_price else None
+        # Projected entry for WAIT
+        if zone_price is not None:
+            proj_entry = zone_price
+            is_long_proj = zone_type == "지지"
+            sr_proj = find_sr_levels(df_15m, proj_entry)
+            sl_proj, _ = get_atr_stop(df_15m, proj_entry, is_long_proj, sr_proj, mult=0.8)
+            sups_proj = sorted([(lv, t) for lv, t in sr_proj if lv < proj_entry], reverse=True)
+            ress_proj = sorted([(lv, t) for lv, t in sr_proj if lv > proj_entry])
+            risk_proj = proj_entry - sl_proj if is_long_proj else sl_proj - proj_entry
+            tp1_proj = (ress_proj[0][0] if ress_proj else proj_entry + risk_proj * 2.0) if is_long_proj else (sups_proj[0][0] if sups_proj else proj_entry - risk_proj * 2.0)
+            projected_trade = {
+                "entry": proj_entry,
+                "sl": sl_proj,
+                "tp1": tp1_proj,
+                "direction": "LONG" if is_long_proj else "SHORT",
+            }
     elif at_zone and trigger_ok:
         # Determine trade direction from zone type
         if zone_type == "지지":
@@ -1005,6 +1201,12 @@ def scalp_decision_engine(df_4h, df_1h, df_15m, df_5m, funding_rate, btc_directi
         pattern_label=pattern_label,
         btc_conflict=btc_conflict,
         btc_conflict_label=btc_conflict_label,
+        chart_patterns=chart_patterns,
+        momentum=momentum,
+        approaching_zone=approaching_zone,
+        approach_price=approach_price,
+        approach_type=approach_type,
+        projected_trade=projected_trade if (at_zone and not trigger_ok and zone_price) else None,
     )
 
 
@@ -1061,6 +1263,24 @@ def render_scalp_decision_card(result, symbol):
         for s in result["steps"]
     )
 
+    # Pattern section HTML
+    patterns = result.get("chart_patterns", [])
+    pattern_html = ""
+    if patterns:
+        p_items = " · ".join(
+            f'<span style="color:#e8c85d;font-weight:600">{p["tf"]}</span> {p["name"]}'
+            for p in patterns[:2]
+        )
+        p_descs = " | ".join(p["desc"] for p in patterns[:2])
+        pattern_html = (
+            '<div style="background:#1a1505;border:1px solid #4a4010;border-radius:8px;'
+            'padding:8px 12px;margin-bottom:8px">'
+            '<div style="font-size:10px;color:#888;font-weight:700;margin-bottom:3px">📊 차트 패턴</div>'
+            '<div style="font-size:12px;color:#e8c85d">' + p_items + '</div>'
+            '<div style="font-size:10px;color:#999;margin-top:2px">' + p_descs + '</div>'
+            '</div>'
+        )
+
     html = (
         '<div style="background:' + bg + ';border:2px solid ' + bd + ';border-radius:14px;'
         'padding:14px 18px 12px;margin-bottom:8px">'
@@ -1081,7 +1301,7 @@ def render_scalp_decision_card(result, symbol):
         '</div>'
         '</div>'
     )
-    st.markdown(html, unsafe_allow_html=True)
+    st.markdown(pattern_html + html, unsafe_allow_html=True)
 
     # Trade metrics if LONG or SHORT
     if decision in ("LONG", "SHORT") and result["sl"] is not None:
@@ -1108,7 +1328,10 @@ def render_scalp_decision_card(result, symbol):
         # 📋 시나리오
         zone_str = f"{zone_type_kr} ${zone_p:,.0f}" if zone_p else zone_type_kr
         dir_str = "상승" if decision == "LONG" else "하락"
+        pat_str = " · ".join(f'{p["tf"]} {p["name"]}' for p in result.get("chart_patterns", [])[:2])
+        pat_prefix = f"📊 {pat_str}  \n" if pat_str else ""
         scenario = (
+            pat_prefix +
             f"**{zone_str} 반응 확인 → 지금이 진입 구간.**  \n"
             f"4H·1H 모두 {dir_str} 방향. "
             f"TP1 ${tp1:,.0f} 목표, ${sl:,.0f} 이탈 시 즉시 손절 (실질 R:R {rr1:.1f})."
@@ -1116,19 +1339,36 @@ def render_scalp_decision_card(result, symbol):
         st.info("📋 " + scenario)
 
     elif decision == "WAIT" and result["entry_zone"] is not None:
+        proj = result.get("projected_trade")
+        patterns = result.get("chart_patterns", [])
+        pat_str = " · ".join(f'{p["tf"]} {p["name"]}' for p in patterns[:2]) if patterns else ""
+
         ez = result["entry_zone"]
         zone_p = result.get("zone_price")
         zone_type_kr = result.get("zone_type", "구간")
         direction = result.get("direction", "neutral")
         dir_str = {"bull": "상승", "bear": "하락", "neutral": "횡보"}.get(direction, "횡보")
 
-        # 📋 시나리오
-        zone_str = f"{zone_type_kr} ${zone_p:,.0f}" if zone_p else "구간"
-        scenario = (
-            f"**{zone_str} 근접, 아직 5분봉 반응 없음.**  \n"
-            f"${ez[0]:,.0f}~${ez[1]:,.0f} 구간에서 반응 캔들(아랫꼬리+거래량) 확인 후 진입. "
-            f"반응 없이 이탈 시 대기 유지. (4H {dir_str})"
-        )
+        if proj:
+            sl_pct = (proj["sl"] - zone_p) / zone_p * 100
+            tp1_pct = (proj["tp1"] - zone_p) / zone_p * 100
+            risk = abs(zone_p - proj["sl"])
+            rr = abs(proj["tp1"] - zone_p) / risk if risk > 0 else 0
+            pat_prefix2 = f"📊 {pat_str} 패턴 진행 중  \n" if pat_str else ""
+            scenario = (
+                pat_prefix2 +
+                f"**{zone_type_kr} ${zone_p:,.0f} 반응 확인 시 {proj['direction']} 추천**  \n"
+                f"예상 진입 `${proj['entry']:,.0f}` | SL `${proj['sl']:,.2f}` ({sl_pct:+.2f}%) | "
+                f"TP1 `${proj['tp1']:,.0f}` ({tp1_pct:+.2f}%) · R:R {rr:.1f}  \n"
+                f"지금은 반응 캔들 미확인 → 대기. ${ez[0]:,.0f}~${ez[1]:,.0f} 구간 주시 (4H {dir_str})"
+            )
+        else:
+            pat_prefix2 = f"📊 {pat_str} 패턴 진행 중  \n" if pat_str else ""
+            scenario = (
+                pat_prefix2 +
+                f"**{zone_type_kr} ${zone_p:,.0f} 근접, 반응 캔들 대기 중.**  \n"
+                f"${ez[0]:,.0f}~${ez[1]:,.0f} 구간에서 아랫꼬리+거래량 확인 후 진입. (4H {dir_str})"
+            )
         st.info("📋 " + scenario)
 
     else:
@@ -1148,6 +1388,14 @@ def render_scalp_decision_card(result, symbol):
         else:
             scenario = f"**{reason} → 관망.** 억지로 진입하기보다 다음 기회를 기다리세요."
         st.warning("📋 " + scenario)
+
+        # Approaching zone info
+        if result.get("approaching_zone") and not result.get("zone_price"):
+            approach_p = result.get("approach_price")
+            approach_t = result.get("approach_type")
+            if approach_p and approach_t:
+                dist_pct = abs(approach_p - result["price"]) / result["price"] * 100
+                st.info(f"👀 **{approach_t} ${approach_p:,.0f} 접근 중** ({dist_pct:.1f}% 거리) — 구간 도달 시 반응 확인")
 
 
 # ══════════════════════════════════════════════

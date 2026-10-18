@@ -116,6 +116,86 @@ def calc_volume_ok(df):
     avg = vol.rolling(20).mean().iloc[-1]
     return (vol.iloc[-1] / avg) >= 1.3 if (avg and avg > 0) else False
 
+def detect_chart_patterns(df_4h, df_1h, df_15m, price):
+    """Multi-timeframe chart pattern detector. Returns list of dicts."""
+    patterns = []
+    tf_configs = [
+        (df_4h,  "4H",  80),
+        (df_1h,  "1H",  80),
+        (df_15m, "15m", 100),
+    ]
+    for df, tf_name, lookback in tf_configs:
+        if df is None or len(df) < lookback:
+            continue
+        h = df["high"].values[-lookback:]
+        l = df["low"].values[-lookback:]
+        peaks,   _ = find_peaks(h, distance=5, prominence=h.std() * 0.3)
+        troughs, _ = find_peaks(-l, distance=5, prominence=l.std() * 0.3)
+        recent_cutoff = lookback - 30
+
+        if len(troughs) >= 3:
+            t1, t2, t3 = troughs[-3], troughs[-2], troughs[-1]
+            if t3 >= recent_cutoff and l[t1] > l[t2] > l[t3]:
+                patterns.append({"name": "3드라이브 하락", "tf": tf_name, "bias": "bull", "level": float(l[t3])})
+        if len(peaks) >= 3:
+            p1, p2, p3 = peaks[-3], peaks[-2], peaks[-1]
+            if p3 >= recent_cutoff and h[p1] < h[p2] < h[p3]:
+                patterns.append({"name": "3드라이브 상승", "tf": tf_name, "bias": "bear", "level": float(h[p3])})
+        if len(troughs) >= 2:
+            ta_, tb_ = troughs[-2], troughs[-1]
+            if tb_ >= recent_cutoff and abs(l[ta_] - l[tb_]) / max(l[ta_], l[tb_]) <= 0.015:
+                patterns.append({"name": "더블바텀", "tf": tf_name, "bias": "bull", "level": float((l[ta_] + l[tb_]) / 2)})
+        if len(peaks) >= 2:
+            pa_, pb_ = peaks[-2], peaks[-1]
+            if pb_ >= recent_cutoff and abs(h[pa_] - h[pb_]) / max(h[pa_], h[pb_]) <= 0.015:
+                patterns.append({"name": "더블탑", "tf": tf_name, "bias": "bear", "level": float((h[pa_] + h[pb_]) / 2)})
+        if len(troughs) >= 3:
+            s1, head, s2 = troughs[-3], troughs[-2], troughs[-1]
+            if s2 >= recent_cutoff and l[head] < l[s1] and l[head] < l[s2]:
+                patterns.append({"name": "역헤드앤숄더", "tf": tf_name, "bias": "bull", "level": float(l[head])})
+        if len(peaks) >= 3:
+            s1, head, s2 = peaks[-3], peaks[-2], peaks[-1]
+            if s2 >= recent_cutoff and h[head] > h[s1] and h[head] > h[s2]:
+                patterns.append({"name": "헤드앤숄더", "tf": tf_name, "bias": "bear", "level": float(h[head])})
+
+    seen = set()
+    unique = []
+    for p in patterns:
+        if p["name"] not in seen:
+            seen.add(p["name"])
+            unique.append(p)
+        if len(unique) >= 3:
+            break
+    return unique
+
+def detect_momentum_exhaustion(df_15m, df_5m):
+    """Count consecutive same-direction candles. Returns exhaustion dict."""
+    empty = {"exhausted": False, "direction": "", "count": 0, "tf": "", "label": ""}
+    for df, tf_name in [(df_5m, "5m"), (df_15m, "15m")]:
+        if df is None or len(df) < 5:
+            continue
+        last10 = df.tail(10)
+        candles = [(row["close"] >= row["open"]) for _, row in last10.iterrows()]
+        last_dir = candles[-1]
+        count = 0
+        for c in reversed(candles):
+            if c == last_dir:
+                count += 1
+            else:
+                break
+        if count >= 4:
+            direction = "bull" if last_dir else "bear"
+            dir_str   = "상승" if last_dir else "하락"
+            opp       = "숏" if last_dir else "롱"
+            return {
+                "exhausted": True,
+                "direction": direction,
+                "count": count,
+                "tf": tf_name,
+                "label": f"⚠️ {tf_name} {dir_str} {count}연속 — {opp} 신호 신중",
+            }
+    return empty
+
 # ── S/R 구간
 def find_sr_zones(df, price, lookback=120, tolerance=0.005):
     h = df["high"].values[-lookback:]
@@ -286,11 +366,16 @@ def compute_signal(symbol, display, funding_rate, btc_dir=None):
     elif direction == "neutral": pattern = "지지반응" if is_long else "저항반응"
     else: pattern = "역추세반등" if is_long else "저항반응"
 
+    # 차트 패턴 / 모멘텀 소진
+    chart_pats = detect_chart_patterns(df_4h, df_1h, df_15m, price)
+    momentum   = detect_momentum_exhaustion(df_15m, df_5m)
+
     return {
         "decision": trade_dir, "pattern": pattern,
         "price": price, "sl": sl, "tp1": tp1, "tp2": tp2,
         "rr1": rr1, "zone_price": zone_price, "zone_type": zone_type,
         "symbol": display, "funding": funding_rate,
+        "chart_patterns": chart_pats, "momentum": momentum,
     }
 
 def get_btc_direction():
@@ -328,12 +413,18 @@ def main():
                         sl_pct  = (sig["sl"]  - sig["price"]) / sig["price"] * 100
                         tp1_pct = (sig["tp1"] - sig["price"]) / sig["price"] * 100
                         now_str = datetime.now(KST).strftime("%H:%M")
+                        # Chart pattern suffix
+                        cp = sig.get("chart_patterns", [])
+                        pat_suffix = " | " + " · ".join(f'{p["tf"]} {p["name"]}' for p in cp[:2]) if cp else ""
+                        # Momentum exhaustion warning
+                        mom = sig.get("momentum", {})
+                        mom_line = f"\n{mom['label']}" if mom.get("exhausted") else ""
                         msg = (
-                            f"{em} *{display} {sig['decision']}* — {sig['pattern']}\n"
+                            f"{em} *{display} {sig['decision']}* — {sig['pattern']}{pat_suffix}\n"
                             f"진입 `${sig['price']:,.2f}`\n"
                             f"손절 `${sig['sl']:,.2f}` ({sl_pct:+.2f}%)\n"
                             f"TP1  `${sig['tp1']:,.2f}` ({tp1_pct:+.2f}%) · R:R {sig['rr1']:.1f}\n"
-                            f"🚫 `${sig['sl']:,.2f}` 이탈 시 즉시 손절\n"
+                            f"🚫 `${sig['sl']:,.2f}` 이탈 시 즉시 손절{mom_line}\n"
                             f"_{now_str} KST_"
                         )
                         send(msg)
