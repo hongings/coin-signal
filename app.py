@@ -517,6 +517,149 @@ def detect_chart_patterns(df_4h, df_1h, df_15m, price):
     return unique
 
 
+def render_pattern_card(patterns, price):
+    """패턴별 ASCII 모양 + 가격 레벨 카드 렌더링"""
+    if not patterns:
+        return
+
+    def _fmt(p):
+        name = p["name"]
+        tf   = p["tf"]
+        lv   = p["level"]
+        bias = p["bias"]
+        col  = "#5de8a0" if bias == "bull" else "#e85d5d"
+        em   = "🟢" if bias == "bull" else "🔴"
+
+        # ── ASCII 모양 + 가격 레벨
+        if name == "더블바텀":
+            neckline = price * 1.02  # 임시 넥라인 추정 (현재가보다 2% 위)
+            target   = lv + (neckline - lv) * 2
+            fail_lv  = lv * 0.99
+            art = (
+                f'<div style="font-family:monospace;font-size:11px;color:#ccc;line-height:1.6;'
+                f'background:#111;border-radius:6px;padding:8px 10px;margin:6px 0">'
+                f'넥라인 <span style="color:#e8c85d">━━━━━━━━</span> ${neckline:,.0f}<br>'
+                f'&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;↗&nbsp;&nbsp;&nbsp;↗<br>'
+                f'<span style="color:{col}">①${lv:,.0f}</span>'
+                f'&nbsp;&nbsp;<span style="color:{col}">②${lv:,.0f}</span><br>'
+                f'&nbsp;╲___╱&nbsp;╲___╱'
+                f'</div>'
+                f'<div style="font-size:10px;color:#aaa;margin-top:4px">'
+                f'✅ 넥라인 ${neckline:,.0f} 돌파 → 목표 ${target:,.0f} (+{(target-price)/price*100:.1f}%)<br>'
+                f'⛔ ${fail_lv:,.0f} 이탈 → 패턴 무효'
+                f'</div>'
+            )
+
+        elif name == "더블탑":
+            neckline = price * 0.98
+            target   = lv - (lv - neckline) * 2
+            fail_lv  = lv * 1.01
+            art = (
+                f'<div style="font-family:monospace;font-size:11px;color:#ccc;line-height:1.6;'
+                f'background:#111;border-radius:6px;padding:8px 10px;margin:6px 0">'
+                f'&nbsp;╱‾‾‾╲&nbsp;╱‾‾‾╲<br>'
+                f'<span style="color:{col}">①${lv:,.0f}</span>'
+                f'&nbsp;&nbsp;<span style="color:{col}">②${lv:,.0f}</span><br>'
+                f'&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;↘&nbsp;&nbsp;&nbsp;↘<br>'
+                f'넥라인 <span style="color:#e8c85d">━━━━━━━━</span> ${neckline:,.0f}'
+                f'</div>'
+                f'<div style="font-size:10px;color:#aaa;margin-top:4px">'
+                f'✅ 넥라인 ${neckline:,.0f} 이탈 → 목표 ${target:,.0f} ({(target-price)/price*100:.1f}%)<br>'
+                f'⛔ ${fail_lv:,.0f} 돌파 → 패턴 무효'
+                f'</div>'
+            )
+
+        elif name == "3드라이브 하락":
+            p1 = lv * 1.04; p2 = lv * 1.02
+            art = (
+                f'<div style="font-family:monospace;font-size:11px;color:#ccc;line-height:1.6;'
+                f'background:#111;border-radius:6px;padding:8px 10px;margin:6px 0">'
+                f'<span style="color:{col}">①${p1:,.0f}</span>'
+                f'&nbsp;<span style="color:{col}">②${p2:,.0f}</span>'
+                f'&nbsp;<span style="color:{col}">③${lv:,.0f}</span><br>'
+                f'&nbsp;&nbsp;↘↗&nbsp;&nbsp;↘↗&nbsp;&nbsp;↘?<br>'
+                f'&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;반전 대기'
+                f'</div>'
+                f'<div style="font-size:10px;color:#aaa;margin-top:4px">'
+                f'✅ ③저점 ${lv:,.0f} 지지 확인 → 반등 진입<br>'
+                f'⛔ ${lv*0.99:,.0f} 이탈 → 추가 하락'
+                f'</div>'
+            )
+
+        elif name == "3드라이브 상승":
+            p1 = lv * 0.96; p2 = lv * 0.98
+            art = (
+                f'<div style="font-family:monospace;font-size:11px;color:#ccc;line-height:1.6;'
+                f'background:#111;border-radius:6px;padding:8px 10px;margin:6px 0">'
+                f'&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;반전 대기<br>'
+                f'&nbsp;&nbsp;↗↘&nbsp;&nbsp;↗↘&nbsp;&nbsp;↗?<br>'
+                f'<span style="color:{col}">①${p1:,.0f}</span>'
+                f'&nbsp;<span style="color:{col}">②${p2:,.0f}</span>'
+                f'&nbsp;<span style="color:{col}">③${lv:,.0f}</span>'
+                f'</div>'
+                f'<div style="font-size:10px;color:#aaa;margin-top:4px">'
+                f'✅ ③고점 ${lv:,.0f} 저항 확인 → 숏 진입<br>'
+                f'⛔ ${lv*1.01:,.0f} 돌파 → 추가 상승'
+                f'</div>'
+            )
+
+        elif name == "역헤드앤숄더":
+            neck = lv * 1.03
+            target = neck + (neck - lv)
+            art = (
+                f'<div style="font-family:monospace;font-size:11px;color:#ccc;line-height:1.6;'
+                f'background:#111;border-radius:6px;padding:8px 10px;margin:6px 0">'
+                f'넥라인 <span style="color:#e8c85d">━━━━━━━━</span> ${neck:,.0f}<br>'
+                f'①숄더&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;③숄더<br>'
+                f'&nbsp;╲___╱&nbsp;&nbsp;&nbsp;╲___╱<br>'
+                f'&nbsp;&nbsp;&nbsp;&nbsp;②헤드 <span style="color:{col}">${lv:,.0f}</span>'
+                f'</div>'
+                f'<div style="font-size:10px;color:#aaa;margin-top:4px">'
+                f'✅ 넥라인 ${neck:,.0f} 돌파 → 목표 ${target:,.0f}<br>'
+                f'⛔ 헤드 ${lv*0.99:,.0f} 이탈 → 패턴 무효'
+                f'</div>'
+            )
+
+        elif name == "헤드앤숄더":
+            neck = lv * 0.97
+            target = neck - (lv - neck)
+            art = (
+                f'<div style="font-family:monospace;font-size:11px;color:#ccc;line-height:1.6;'
+                f'background:#111;border-radius:6px;padding:8px 10px;margin:6px 0">'
+                f'&nbsp;&nbsp;&nbsp;&nbsp;②헤드 <span style="color:{col}">${lv:,.0f}</span><br>'
+                f'&nbsp;╱‾‾‾╲&nbsp;&nbsp;&nbsp;╱‾‾‾╲<br>'
+                f'①숄더&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;③숄더<br>'
+                f'넥라인 <span style="color:#e8c85d">━━━━━━━━</span> ${neck:,.0f}'
+                f'</div>'
+                f'<div style="font-size:10px;color:#aaa;margin-top:4px">'
+                f'✅ 넥라인 ${neck:,.0f} 이탈 → 목표 ${target:,.0f}<br>'
+                f'⛔ 헤드 ${lv*1.01:,.0f} 돌파 → 패턴 무효'
+                f'</div>'
+            )
+        else:
+            art = f'<div style="font-size:10px;color:#aaa">{p.get("desc","")}</div>'
+
+        return (
+            f'<div style="background:#15150a;border:1px solid #3a3a15;border-radius:10px;'
+            f'padding:10px 12px;margin-bottom:8px">'
+            f'<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">'
+            f'<span style="font-size:13px">{em}</span>'
+            f'<span style="font-size:12px;font-weight:700;color:{col}">{name}</span>'
+            f'<span style="font-size:10px;color:#888;background:#222;padding:1px 6px;border-radius:4px">{tf}</span>'
+            f'</div>'
+            + art +
+            f'</div>'
+        )
+
+    html = "".join(_fmt(p) for p in patterns[:2])
+    st.markdown(
+        '<div style="margin-bottom:6px">'
+        '<div style="font-size:10px;color:#888;font-weight:700;letter-spacing:1px;margin-bottom:6px">📊 차트 패턴 분석</div>'
+        + html + '</div>',
+        unsafe_allow_html=True
+    )
+
+
 def detect_momentum_exhaustion(df_15m, df_5m):
     """
     Count consecutive same-direction candles from the last 10 bars.
@@ -1263,23 +1406,8 @@ def render_scalp_decision_card(result, symbol):
         for s in result["steps"]
     )
 
-    # Pattern section HTML
-    patterns = result.get("chart_patterns", [])
-    pattern_html = ""
-    if patterns:
-        p_items = " · ".join(
-            f'<span style="color:#e8c85d;font-weight:600">{p["tf"]}</span> {p["name"]}'
-            for p in patterns[:2]
-        )
-        p_descs = " | ".join(p["desc"] for p in patterns[:2])
-        pattern_html = (
-            '<div style="background:#1a1505;border:1px solid #4a4010;border-radius:8px;'
-            'padding:8px 12px;margin-bottom:8px">'
-            '<div style="font-size:10px;color:#888;font-weight:700;margin-bottom:3px">📊 차트 패턴</div>'
-            '<div style="font-size:12px;color:#e8c85d">' + p_items + '</div>'
-            '<div style="font-size:10px;color:#999;margin-top:2px">' + p_descs + '</div>'
-            '</div>'
-        )
+    # 패턴 카드 (ASCII 모양 + 가격 레벨)
+    render_pattern_card(result.get("chart_patterns", []), price)
 
     html = (
         '<div style="background:' + bg + ';border:2px solid ' + bd + ';border-radius:14px;'
@@ -1301,7 +1429,7 @@ def render_scalp_decision_card(result, symbol):
         '</div>'
         '</div>'
     )
-    st.markdown(pattern_html + html, unsafe_allow_html=True)
+    st.markdown(html, unsafe_allow_html=True)
 
     # Trade metrics if LONG or SHORT
     if decision in ("LONG", "SHORT") and result["sl"] is not None:
