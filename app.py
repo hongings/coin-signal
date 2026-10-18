@@ -639,7 +639,73 @@ def get_pattern_chart_annotations(df, price, lookback=100):
                 "line_points": [(ts[s1], float(h[s1])), (ts[hd], float(h[hd])), (ts[s2], float(h[s2]))],
             })
 
+    # ── 각 패턴에 현재 단계 + 행동 안내 추가
+    for ann in annotations:
+        ann["stage"], ann["stage_label"], ann["action"] = _pattern_stage(ann, price)
+
     return annotations[:2]
+
+
+def _pattern_stage(ann, price):
+    """현재가 기준 패턴 진행 단계 반환 → (단계번호, 단계라벨, 행동안내)"""
+    name   = ann["name"]
+    nk     = ann.get("neckline")
+    tg     = ann.get("target")
+    pivots = ann["pivots"]
+
+    if name == "더블바텀":
+        min_b = min(p[1] for p in pivots)
+        if price <= min_b * 1.012:
+            return 1, "② 저점 재테스트 중", f"반등 캔들(아랫꼬리+거래량) 확인 시 롱 준비 — SL ${min_b*0.995:,.0f}"
+        elif nk and price < nk * 0.998:
+            return 2, "넥라인 돌파 대기", f"5분봉 종가 ${nk:,.0f} 돌파 확인 시 롱 — 목표 ${tg:,.0f}" if tg else f"5분봉 종가 ${nk:,.0f} 돌파 확인 시 롱"
+        else:
+            return 3, "넥라인 돌파 완료 ✅", f"목표가 ${tg:,.0f} 진행 중 — 절반 익절 후 트레일링" if tg else "목표가 진행 중"
+
+    elif name == "더블탑":
+        max_h = max(p[1] for p in pivots)
+        if price >= max_h * 0.988:
+            return 1, "② 고점 재테스트 중", f"하락 캔들(윗꼬리+거래량) 확인 시 숏 준비 — SL ${max_h*1.005:,.0f}"
+        elif nk and price > nk * 1.002:
+            return 2, "넥라인 이탈 대기", f"5분봉 종가 ${nk:,.0f} 이탈 확인 시 숏 — 목표 ${tg:,.0f}" if tg else f"5분봉 종가 ${nk:,.0f} 이탈 확인 시 숏"
+        else:
+            return 3, "넥라인 이탈 완료 ✅", f"목표가 ${tg:,.0f} 진행 중 — 절반 익절 후 트레일링" if tg else "목표가 진행 중"
+
+    elif name == "역헤드앤숄더":
+        rs_low = pivots[2][1]
+        head_low = min(p[1] for p in pivots)
+        if price <= rs_low * 1.015:
+            return 1, "③ 우어깨 형성 중", f"반등 캔들 확인 시 롱 준비 — SL ${head_low*0.995:,.0f}"
+        elif nk and price < nk * 0.998:
+            return 2, "넥라인 돌파 대기", f"5분봉 종가 ${nk:,.0f} 돌파 확인 시 롱 — 목표 ${tg:,.0f}" if tg else f"5분봉 종가 ${nk:,.0f} 돌파 확인 시 롱"
+        else:
+            return 3, "넥라인 돌파 완료 ✅", f"목표가 ${tg:,.0f} 진행 중 — 절반 익절 후 트레일링" if tg else "목표가 진행 중"
+
+    elif name == "헤드앤숄더":
+        rs_high = pivots[2][1]
+        head_high = max(p[1] for p in pivots)
+        if price >= rs_high * 0.985:
+            return 1, "③ 우어깨 형성 중", f"하락 캔들 확인 시 숏 준비 — SL ${head_high*1.005:,.0f}"
+        elif nk and price > nk * 1.002:
+            return 2, "넥라인 이탈 대기", f"5분봉 종가 ${nk:,.0f} 이탈 확인 시 숏 — 목표 ${tg:,.0f}" if tg else f"5분봉 종가 ${nk:,.0f} 이탈 확인 시 숏"
+        else:
+            return 3, "넥라인 이탈 완료 ✅", f"목표가 ${tg:,.0f} 진행 중 — 절반 익절 후 트레일링" if tg else "목표가 진행 중"
+
+    elif name == "3드라이브 하락":
+        d3_low = pivots[2][1]
+        if price <= d3_low * 1.015:
+            return 1, "③ 드라이브 저점 근처", f"반등 캔들 확인 시 롱 — SL ${d3_low*0.995:,.0f} — 목표 ${tg:,.0f}" if tg else f"반등 캔들 확인 시 롱 — SL ${d3_low*0.995:,.0f}"
+        else:
+            return 2, "반등 진행 중", f"목표가 ${tg:,.0f} 향해 진행 중" if tg else "목표가 향해 진행 중"
+
+    elif name == "3드라이브 상승":
+        d3_high = pivots[2][1]
+        if price >= d3_high * 0.985:
+            return 1, "③ 드라이브 고점 근처", f"하락 캔들 확인 시 숏 — SL ${d3_high*1.005:,.0f} — 목표 ${tg:,.0f}" if tg else f"하락 캔들 확인 시 숏 — SL ${d3_high*1.005:,.0f}"
+        else:
+            return 2, "하락 진행 중", f"목표가 ${tg:,.0f} 향해 진행 중" if tg else "목표가 향해 진행 중"
+
+    return 0, "패턴 형성 중", "추가 확인 대기"
 
 
 def detect_momentum_exhaustion(df_15m, df_5m):
@@ -940,15 +1006,36 @@ def build_pattern_detail_chart(df, ann, display):
                       annotation_text=f"  패턴 무효  ${fl:,.0f}",
                       annotation_font_color="#ff4444", annotation_font_size=10)
 
-    # 음영 범례 텍스트
-    legend_color = "rgba(0,200,100,0.7)" if is_bull else "rgba(255,80,80,0.7)"
+    # 현재가 라인
+    cur_price = df["close"].iloc[-1]
+    fig.add_hline(y=cur_price, line_color="rgba(255,255,255,0.55)", line_dash="solid", line_width=1,
+                  annotation_text=f"  현재 ${cur_price:,.0f}",
+                  annotation_font_color="rgba(255,255,255,0.7)", annotation_font_size=10)
+
+    # 단계 + 행동 안내 배너 (차트 상단)
+    stage_num   = ann.get("stage", 0)
+    stage_label = ann.get("stage_label", "")
+    action_text = ann.get("action", "")
+    stage_colors = {1: "#e8c85d", 2: "#00BFFF", 3: "#5de8a0"}
+    s_col = stage_colors.get(stage_num, "#aaaaaa")
     fig.add_annotation(
-        x=0.01, y=0.97, xref="paper", yref="paper",
+        x=0.5, y=1.13, xref="paper", yref="paper",
+        text=f"<b>▶ {stage_label}</b>  ·  {action_text}",
+        showarrow=False,
+        font=dict(size=12, color=s_col),
+        align="center",
+        bgcolor="rgba(0,0,0,0.55)", bordercolor=s_col, borderwidth=1.5,
+    )
+
+    # 음영 범례 (우하단)
+    legend_color = "rgba(0,200,100,0.6)" if is_bull else "rgba(255,80,80,0.6)"
+    fig.add_annotation(
+        x=0.01, y=0.04, xref="paper", yref="paper",
         text=f"{'🟢' if is_bull else '🔴'} 색 구간 = {ann['name']} 형성 영역",
         showarrow=False,
-        font=dict(size=11, color=legend_color),
+        font=dict(size=10, color=legend_color),
         align="left",
-        bgcolor="rgba(0,0,0,0.45)", bordercolor=legend_color, borderwidth=1,
+        bgcolor="rgba(0,0,0,0.4)", bordercolor=legend_color, borderwidth=1,
     )
 
     pad = (dp["high"].max() - dp["low"].min()) * 0.08
@@ -960,7 +1047,7 @@ def build_pattern_detail_chart(df, ann, display):
         title=dict(text=f"  {ann['name']} — {bias_kr} 패턴 (15분)",
                    font=dict(size=13, color=mc), x=0),
         legend=dict(orientation="h", y=1.05, x=0, font=dict(size=9)),
-        margin=dict(l=4, r=100, t=36, b=4),
+        margin=dict(l=4, r=100, t=60, b=4),
         autosize=True,
     )
     fig.update_xaxes(showgrid=True, gridcolor="rgba(255,255,255,0.05)")
