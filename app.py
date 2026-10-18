@@ -1044,7 +1044,7 @@ def build_pattern_detail_chart(df, ann, display):
         height=320,
         paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
         xaxis_rangeslider_visible=False,
-        title=dict(text=f"  {ann['name']} — {bias_kr} 패턴 (15분)",
+        title=dict(text=f"  {ann['name']} — {bias_kr} 패턴 ({ann.get('tf', '15분')})",
                    font=dict(size=13, color=mc), x=0),
         legend=dict(orientation="h", y=1.05, x=0, font=dict(size=9)),
         margin=dict(l=4, r=100, t=60, b=4),
@@ -1774,8 +1774,19 @@ def render_analysis_scalp(symbol, display, funding_rate, btc_direction=None):
 
     result = scalp_decision_engine(df_4h, df_1h, df_15m, df_5m, funding_rate, btc_direction=btc_direction)
 
-    # 패턴 어노테이션은 결정 카드 아래에도 쓰이므로 먼저 계산
-    pat_annotations = get_pattern_chart_annotations(df_15m, price)
+    # 패턴 어노테이션 — 4H / 1H / 15분 모두 감지, TF 태그 붙여서 합산
+    _df_tf = [("4H", df_4h), ("1H", df_1h), ("15분", df_15m)]
+    pat_annotations = []
+    seen_names = set()
+    for tf_label_p, df_p in _df_tf:
+        if df_p is None:
+            continue
+        for ann in get_pattern_chart_annotations(df_p, price):
+            if ann["name"] not in seen_names:
+                ann["tf"] = tf_label_p
+                seen_names.add(ann["name"])
+                pat_annotations.append(ann)
+    pat_annotations = pat_annotations[:3]
 
     render_scalp_decision_card(result, display)
 
@@ -1785,9 +1796,11 @@ def render_analysis_scalp(symbol, display, funding_rate, btc_direction=None):
               "롱과열" if funding_rate*100 > 0.05 else ("숏과열" if funding_rate*100 < -0.05 else "중립"))
 
     # ── 패턴 상세 차트 (감지된 패턴이 있을 때만 표시)
+    _df_map = {"4H": df_4h, "1H": df_1h, "15분": df_15m}
     if pat_annotations:
-        for ann in pat_annotations[:2]:
-            fig_pat = build_pattern_detail_chart(df_15m, ann, display)
+        for ann in pat_annotations:
+            df_for_pat = _df_map.get(ann.get("tf", "15분"), df_15m)
+            fig_pat = build_pattern_detail_chart(df_for_pat, ann, display)
             st.plotly_chart(fig_pat, use_container_width=True,
                             config={"responsive": True, "displayModeBar": False})
 
@@ -1829,7 +1842,7 @@ def render_analysis_scalp(symbol, display, funding_rate, btc_direction=None):
                           rsi_ser, ml, msl, mhl, sk, sd,
                           sr_levels, [], [], chart_rec, display,
                           vwap=vwap_ser, tf_label="15분",
-                          pattern_annotations=pat_annotations)
+                          pattern_annotations=[a for a in pat_annotations if a.get("tf") == "15분"])
         st.plotly_chart(fig, use_container_width=True,
                         config={"responsive": True, "displayModeBar": False})
 
