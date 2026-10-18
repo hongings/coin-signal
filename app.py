@@ -852,6 +852,123 @@ def build_chart(df, ema_series, bb_u, bb_l, bb_m,
     return fig
 
 
+def build_pattern_detail_chart(df, ann, display):
+    """
+    패턴 구간만 줌인한 상세 차트.
+    캔들 + 배경음영 + 연결선 + 마커 + 넥라인 + 목표가 만 표시.
+    """
+    # 패턴 구간에서 앞뒤 25봉 컨텍스트
+    ctx = 25
+    zone_start = ann.get("zone_start")
+    zone_end   = ann.get("zone_end")
+
+    if zone_start is not None and zone_end is not None:
+        mask = (df["ts"] >= zone_start) & (df["ts"] <= zone_end)
+        idxs = df.index[mask]
+        if len(idxs) > 0:
+            i0 = max(0, idxs[0] - ctx)
+            i1 = min(len(df) - 1, idxs[-1] + ctx)
+            dp = df.iloc[i0:i1+1].copy()
+        else:
+            dp = df.tail(80).copy()
+    else:
+        dp = df.tail(80).copy()
+
+    mc      = ann["marker_color"]
+    is_bull = ann["bias"] == "bull"
+    bias_kr = "📈 상승 반전" if is_bull else "📉 하락 반전"
+    shade   = "rgba(0,200,100,0.13)" if is_bull else "rgba(255,80,80,0.13)"
+    line_col = "#5de8a0" if is_bull else "#e85d5d"
+
+    fig = go.Figure()
+
+    # 캔들
+    fig.add_trace(go.Candlestick(
+        x=dp["ts"], open=dp["open"], high=dp["high"], low=dp["low"], close=dp["close"],
+        name=display,
+        increasing_line_color="#5de8a0", decreasing_line_color="#e85d5d",
+        increasing_fillcolor="#5de8a0", decreasing_fillcolor="#e85d5d",
+        line_width=1,
+    ))
+
+    # 배경 음영
+    if zone_start is not None and zone_end is not None:
+        fig.add_vrect(x0=zone_start, x1=zone_end,
+                      fillcolor=shade, layer="below", line_width=0)
+
+    # 피봇 연결선
+    if ann.get("line_points"):
+        lx = [p[0] for p in ann["line_points"]]
+        ly = [p[1] for p in ann["line_points"]]
+        fig.add_trace(go.Scatter(
+            x=lx, y=ly, mode="lines",
+            line=dict(color=line_col, width=2.5, dash="solid"),
+            name="패턴 선", showlegend=False,
+        ))
+
+    # 피봇 마커 (◆ + 가격 레이블)
+    for ts_p, pr_p, lbl in ann["pivots"]:
+        fig.add_trace(go.Scatter(
+            x=[ts_p], y=[pr_p],
+            mode="markers+text",
+            text=[f"{lbl}<br>${pr_p:,.0f}"],
+            textposition=ann["anchor"],
+            marker=dict(symbol="diamond", size=14, color=mc,
+                        line=dict(color="#fff", width=1.5)),
+            showlegend=False,
+            textfont=dict(color=mc, size=11),
+        ))
+
+    # 넥라인
+    if ann.get("neckline"):
+        nk = ann["neckline"]
+        fig.add_hline(y=nk, line_color="#e8c85d", line_dash="dashdot", line_width=2,
+                      annotation_text=f"  넥라인  ${nk:,.0f}",
+                      annotation_font_color="#e8c85d", annotation_font_size=11)
+
+    # 목표가
+    if ann.get("target"):
+        tg = ann["target"]
+        fig.add_hline(y=tg, line_color=mc, line_dash="dot", line_width=1.5,
+                      annotation_text=f"  목표  ${tg:,.0f}",
+                      annotation_font_color=mc, annotation_font_size=11)
+
+    # 손절가 (fail)
+    if ann.get("fail"):
+        fl = ann["fail"]
+        fig.add_hline(y=fl, line_color="#ff4444", line_dash="dot", line_width=1.2,
+                      annotation_text=f"  패턴 무효  ${fl:,.0f}",
+                      annotation_font_color="#ff4444", annotation_font_size=10)
+
+    # 음영 범례 텍스트
+    legend_color = "rgba(0,200,100,0.7)" if is_bull else "rgba(255,80,80,0.7)"
+    fig.add_annotation(
+        x=0.01, y=0.97, xref="paper", yref="paper",
+        text=f"{'🟢' if is_bull else '🔴'} 색 구간 = {ann['name']} 형성 영역",
+        showarrow=False,
+        font=dict(size=11, color=legend_color),
+        align="left",
+        bgcolor="rgba(0,0,0,0.45)", bordercolor=legend_color, borderwidth=1,
+    )
+
+    pad = (dp["high"].max() - dp["low"].min()) * 0.08
+    fig.update_layout(
+        template="plotly_dark",
+        height=320,
+        paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+        xaxis_rangeslider_visible=False,
+        title=dict(text=f"  {ann['name']} — {bias_kr} 패턴 (15분)",
+                   font=dict(size=13, color=mc), x=0),
+        legend=dict(orientation="h", y=1.05, x=0, font=dict(size=9)),
+        margin=dict(l=4, r=100, t=36, b=4),
+        autosize=True,
+    )
+    fig.update_xaxes(showgrid=True, gridcolor="rgba(255,255,255,0.05)")
+    fig.update_yaxes(showgrid=True, gridcolor="rgba(255,255,255,0.05)",
+                     range=[dp["low"].min() - pad, dp["high"].max() + pad])
+    return fig
+
+
 # ══════════════════════════════════════════════
 # 단타 전용 — 지지저항 존 탐지
 # ══════════════════════════════════════════════
@@ -1570,12 +1687,22 @@ def render_analysis_scalp(symbol, display, funding_rate, btc_direction=None):
 
     result = scalp_decision_engine(df_4h, df_1h, df_15m, df_5m, funding_rate, btc_direction=btc_direction)
 
+    # 패턴 어노테이션은 결정 카드 아래에도 쓰이므로 먼저 계산
+    pat_annotations = get_pattern_chart_annotations(df_15m, price)
+
     render_scalp_decision_card(result, display)
 
     c1, c2 = st.columns(2)
     c1.metric(f"{display}", f"${price:,.2f}", f"{change:+.2f}%")
     c2.metric("펀딩비", f"{funding_rate*100:+.4f}%",
               "롱과열" if funding_rate*100 > 0.05 else ("숏과열" if funding_rate*100 < -0.05 else "중립"))
+
+    # ── 패턴 상세 차트 (감지된 패턴이 있을 때만 표시)
+    if pat_annotations:
+        for ann in pat_annotations[:2]:
+            fig_pat = build_pattern_detail_chart(df_15m, ann, display)
+            st.plotly_chart(fig_pat, use_container_width=True,
+                            config={"responsive": True, "displayModeBar": False})
 
     with st.expander("📈 15분 차트 & 지표 신호", expanded=False):
         ema_s, ema_d, ema_ser = calc_ema(df_15m, periods=(9, 21, 50))
@@ -1587,7 +1714,6 @@ def render_analysis_scalp(symbol, display, funding_rate, btc_direction=None):
         vol_s, vol_d = calc_volume(df_15m)
         fun_s, fun_d = calc_funding(funding_rate)
         sr_levels = find_sr_levels(df_15m, price)
-        pat_annotations = get_pattern_chart_annotations(df_15m, price)
 
         # 지표 신호 그리드 (차트 위에)
         render_signal_grid([
