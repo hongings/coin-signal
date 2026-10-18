@@ -517,147 +517,110 @@ def detect_chart_patterns(df_4h, df_1h, df_15m, price):
     return unique
 
 
-def render_pattern_card(patterns, price):
-    """패턴별 ASCII 모양 + 가격 레벨 카드 렌더링"""
-    if not patterns:
-        return
+def get_pattern_chart_annotations(df, price, lookback=100):
+    """
+    15m 차트에 직접 그릴 패턴 피벗 + 넥라인 데이터 반환.
+    Returns list of annotation dicts for build_chart.
+    """
+    annotations = []
+    lb = min(lookback, len(df))
+    h  = df["high"].values[-lb:]
+    l  = df["low"].values[-lb:]
+    ts = df["ts"].values[-lb:]
+    n  = len(h)
+    recent = n - 30
 
-    def _fmt(p):
-        name = p["name"]
-        tf   = p["tf"]
-        lv   = p["level"]
-        bias = p["bias"]
-        col  = "#5de8a0" if bias == "bull" else "#e85d5d"
-        em   = "🟢" if bias == "bull" else "🔴"
+    peaks,   _ = find_peaks(h, distance=5, prominence=h.std() * 0.3)
+    troughs, _ = find_peaks(-l, distance=5, prominence=l.std() * 0.3)
 
-        # ── ASCII 모양 + 가격 레벨
-        if name == "더블바텀":
-            neckline = price * 1.02  # 임시 넥라인 추정 (현재가보다 2% 위)
-            target   = lv + (neckline - lv) * 2
-            fail_lv  = lv * 0.99
-            art = (
-                f'<div style="font-family:monospace;font-size:11px;color:#ccc;line-height:1.6;'
-                f'background:#111;border-radius:6px;padding:8px 10px;margin:6px 0">'
-                f'넥라인 <span style="color:#e8c85d">━━━━━━━━</span> ${neckline:,.0f}<br>'
-                f'&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;↗&nbsp;&nbsp;&nbsp;↗<br>'
-                f'<span style="color:{col}">①${lv:,.0f}</span>'
-                f'&nbsp;&nbsp;<span style="color:{col}">②${lv:,.0f}</span><br>'
-                f'&nbsp;╲___╱&nbsp;╲___╱'
-                f'</div>'
-                f'<div style="font-size:10px;color:#aaa;margin-top:4px">'
-                f'✅ 넥라인 ${neckline:,.0f} 돌파 → 목표 ${target:,.0f} (+{(target-price)/price*100:.1f}%)<br>'
-                f'⛔ ${fail_lv:,.0f} 이탈 → 패턴 무효'
-                f'</div>'
-            )
+    # ── 더블바텀
+    if len(troughs) >= 2:
+        ta_, tb_ = int(troughs[-2]), int(troughs[-1])
+        if tb_ >= recent and abs(l[ta_] - l[tb_]) / max(l[ta_], l[tb_]) <= 0.015:
+            # 넥라인: 두 저점 사이 고점
+            mid_peaks = [pk for pk in peaks if ta_ < pk < tb_]
+            nk = float(h[mid_peaks[0]]) if mid_peaks else price * 1.015
+            target = nk + (nk - min(l[ta_], l[tb_]))
+            annotations.append({
+                "name": "더블바텀", "bias": "bull",
+                "pivots": [(ts[ta_], float(l[ta_]), "①"), (ts[tb_], float(l[tb_]), "②")],
+                "neckline": nk, "target": target,
+                "fail": min(l[ta_], l[tb_]) * 0.995,
+                "marker_color": "#5de8a0", "anchor": "bottom center",
+            })
 
-        elif name == "더블탑":
-            neckline = price * 0.98
-            target   = lv - (lv - neckline) * 2
-            fail_lv  = lv * 1.01
-            art = (
-                f'<div style="font-family:monospace;font-size:11px;color:#ccc;line-height:1.6;'
-                f'background:#111;border-radius:6px;padding:8px 10px;margin:6px 0">'
-                f'&nbsp;╱‾‾‾╲&nbsp;╱‾‾‾╲<br>'
-                f'<span style="color:{col}">①${lv:,.0f}</span>'
-                f'&nbsp;&nbsp;<span style="color:{col}">②${lv:,.0f}</span><br>'
-                f'&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;↘&nbsp;&nbsp;&nbsp;↘<br>'
-                f'넥라인 <span style="color:#e8c85d">━━━━━━━━</span> ${neckline:,.0f}'
-                f'</div>'
-                f'<div style="font-size:10px;color:#aaa;margin-top:4px">'
-                f'✅ 넥라인 ${neckline:,.0f} 이탈 → 목표 ${target:,.0f} ({(target-price)/price*100:.1f}%)<br>'
-                f'⛔ ${fail_lv:,.0f} 돌파 → 패턴 무효'
-                f'</div>'
-            )
+    # ── 더블탑
+    if len(peaks) >= 2:
+        pa_, pb_ = int(peaks[-2]), int(peaks[-1])
+        if pb_ >= recent and abs(h[pa_] - h[pb_]) / max(h[pa_], h[pb_]) <= 0.015:
+            mid_trs = [tr for tr in troughs if pa_ < tr < pb_]
+            nk = float(l[mid_trs[0]]) if mid_trs else price * 0.985
+            target = nk - (max(h[pa_], h[pb_]) - nk)
+            annotations.append({
+                "name": "더블탑", "bias": "bear",
+                "pivots": [(ts[pa_], float(h[pa_]), "①"), (ts[pb_], float(h[pb_]), "②")],
+                "neckline": nk, "target": target,
+                "fail": max(h[pa_], h[pb_]) * 1.005,
+                "marker_color": "#e85d5d", "anchor": "top center",
+            })
 
-        elif name == "3드라이브 하락":
-            p1 = lv * 1.04; p2 = lv * 1.02
-            art = (
-                f'<div style="font-family:monospace;font-size:11px;color:#ccc;line-height:1.6;'
-                f'background:#111;border-radius:6px;padding:8px 10px;margin:6px 0">'
-                f'<span style="color:{col}">①${p1:,.0f}</span>'
-                f'&nbsp;<span style="color:{col}">②${p2:,.0f}</span>'
-                f'&nbsp;<span style="color:{col}">③${lv:,.0f}</span><br>'
-                f'&nbsp;&nbsp;↘↗&nbsp;&nbsp;↘↗&nbsp;&nbsp;↘?<br>'
-                f'&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;반전 대기'
-                f'</div>'
-                f'<div style="font-size:10px;color:#aaa;margin-top:4px">'
-                f'✅ ③저점 ${lv:,.0f} 지지 확인 → 반등 진입<br>'
-                f'⛔ ${lv*0.99:,.0f} 이탈 → 추가 하락'
-                f'</div>'
-            )
+    # ── 3드라이브 하락
+    if len(troughs) >= 3:
+        t1, t2, t3 = int(troughs[-3]), int(troughs[-2]), int(troughs[-1])
+        if t3 >= recent and l[t1] > l[t2] > l[t3]:
+            target = l[t3] + (l[t1] - l[t3]) * 0.618
+            annotations.append({
+                "name": "3드라이브 하락", "bias": "bull",
+                "pivots": [(ts[t1], float(l[t1]), "①"), (ts[t2], float(l[t2]), "②"), (ts[t3], float(l[t3]), "③")],
+                "neckline": None, "target": target,
+                "fail": l[t3] * 0.995,
+                "marker_color": "#5de8a0", "anchor": "bottom center",
+            })
 
-        elif name == "3드라이브 상승":
-            p1 = lv * 0.96; p2 = lv * 0.98
-            art = (
-                f'<div style="font-family:monospace;font-size:11px;color:#ccc;line-height:1.6;'
-                f'background:#111;border-radius:6px;padding:8px 10px;margin:6px 0">'
-                f'&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;반전 대기<br>'
-                f'&nbsp;&nbsp;↗↘&nbsp;&nbsp;↗↘&nbsp;&nbsp;↗?<br>'
-                f'<span style="color:{col}">①${p1:,.0f}</span>'
-                f'&nbsp;<span style="color:{col}">②${p2:,.0f}</span>'
-                f'&nbsp;<span style="color:{col}">③${lv:,.0f}</span>'
-                f'</div>'
-                f'<div style="font-size:10px;color:#aaa;margin-top:4px">'
-                f'✅ ③고점 ${lv:,.0f} 저항 확인 → 숏 진입<br>'
-                f'⛔ ${lv*1.01:,.0f} 돌파 → 추가 상승'
-                f'</div>'
-            )
+    # ── 3드라이브 상승
+    if len(peaks) >= 3:
+        p1, p2, p3 = int(peaks[-3]), int(peaks[-2]), int(peaks[-1])
+        if p3 >= recent and h[p1] < h[p2] < h[p3]:
+            target = h[p3] - (h[p3] - h[p1]) * 0.618
+            annotations.append({
+                "name": "3드라이브 상승", "bias": "bear",
+                "pivots": [(ts[p1], float(h[p1]), "①"), (ts[p2], float(h[p2]), "②"), (ts[p3], float(h[p3]), "③")],
+                "neckline": None, "target": target,
+                "fail": h[p3] * 1.005,
+                "marker_color": "#e85d5d", "anchor": "top center",
+            })
 
-        elif name == "역헤드앤숄더":
-            neck = lv * 1.03
-            target = neck + (neck - lv)
-            art = (
-                f'<div style="font-family:monospace;font-size:11px;color:#ccc;line-height:1.6;'
-                f'background:#111;border-radius:6px;padding:8px 10px;margin:6px 0">'
-                f'넥라인 <span style="color:#e8c85d">━━━━━━━━</span> ${neck:,.0f}<br>'
-                f'①숄더&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;③숄더<br>'
-                f'&nbsp;╲___╱&nbsp;&nbsp;&nbsp;╲___╱<br>'
-                f'&nbsp;&nbsp;&nbsp;&nbsp;②헤드 <span style="color:{col}">${lv:,.0f}</span>'
-                f'</div>'
-                f'<div style="font-size:10px;color:#aaa;margin-top:4px">'
-                f'✅ 넥라인 ${neck:,.0f} 돌파 → 목표 ${target:,.0f}<br>'
-                f'⛔ 헤드 ${lv*0.99:,.0f} 이탈 → 패턴 무효'
-                f'</div>'
-            )
+    # ── 역헤드앤숄더
+    if len(troughs) >= 3:
+        s1, hd, s2 = int(troughs[-3]), int(troughs[-2]), int(troughs[-1])
+        if s2 >= recent and l[hd] < l[s1] and l[hd] < l[s2]:
+            mid_peaks = [pk for pk in peaks if s1 < pk < s2]
+            nk = float(np.mean([h[pk] for pk in mid_peaks])) if mid_peaks else price * 1.02
+            target = nk + (nk - l[hd])
+            annotations.append({
+                "name": "역헤드앤숄더", "bias": "bull",
+                "pivots": [(ts[s1], float(l[s1]), "①숄"), (ts[hd], float(l[hd]), "②헤"), (ts[s2], float(l[s2]), "③숄")],
+                "neckline": nk, "target": target,
+                "fail": l[hd] * 0.995,
+                "marker_color": "#5de8a0", "anchor": "bottom center",
+            })
 
-        elif name == "헤드앤숄더":
-            neck = lv * 0.97
-            target = neck - (lv - neck)
-            art = (
-                f'<div style="font-family:monospace;font-size:11px;color:#ccc;line-height:1.6;'
-                f'background:#111;border-radius:6px;padding:8px 10px;margin:6px 0">'
-                f'&nbsp;&nbsp;&nbsp;&nbsp;②헤드 <span style="color:{col}">${lv:,.0f}</span><br>'
-                f'&nbsp;╱‾‾‾╲&nbsp;&nbsp;&nbsp;╱‾‾‾╲<br>'
-                f'①숄더&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;③숄더<br>'
-                f'넥라인 <span style="color:#e8c85d">━━━━━━━━</span> ${neck:,.0f}'
-                f'</div>'
-                f'<div style="font-size:10px;color:#aaa;margin-top:4px">'
-                f'✅ 넥라인 ${neck:,.0f} 이탈 → 목표 ${target:,.0f}<br>'
-                f'⛔ 헤드 ${lv*1.01:,.0f} 돌파 → 패턴 무효'
-                f'</div>'
-            )
-        else:
-            art = f'<div style="font-size:10px;color:#aaa">{p.get("desc","")}</div>'
+    # ── 헤드앤숄더
+    if len(peaks) >= 3:
+        s1, hd, s2 = int(peaks[-3]), int(peaks[-2]), int(peaks[-1])
+        if s2 >= recent and h[hd] > h[s1] and h[hd] > h[s2]:
+            mid_trs = [tr for tr in troughs if s1 < tr < s2]
+            nk = float(np.mean([l[tr] for tr in mid_trs])) if mid_trs else price * 0.98
+            target = nk - (h[hd] - nk)
+            annotations.append({
+                "name": "헤드앤숄더", "bias": "bear",
+                "pivots": [(ts[s1], float(h[s1]), "①숄"), (ts[hd], float(h[hd]), "②헤"), (ts[s2], float(h[s2]), "③숄")],
+                "neckline": nk, "target": target,
+                "fail": h[hd] * 1.005,
+                "marker_color": "#e85d5d", "anchor": "top center",
+            })
 
-        return (
-            f'<div style="background:#15150a;border:1px solid #3a3a15;border-radius:10px;'
-            f'padding:10px 12px;margin-bottom:8px">'
-            f'<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">'
-            f'<span style="font-size:13px">{em}</span>'
-            f'<span style="font-size:12px;font-weight:700;color:{col}">{name}</span>'
-            f'<span style="font-size:10px;color:#888;background:#222;padding:1px 6px;border-radius:4px">{tf}</span>'
-            f'</div>'
-            + art +
-            f'</div>'
-        )
-
-    html = "".join(_fmt(p) for p in patterns[:2])
-    st.markdown(
-        '<div style="margin-bottom:6px">'
-        '<div style="font-size:10px;color:#888;font-weight:700;letter-spacing:1px;margin-bottom:6px">📊 차트 패턴 분석</div>'
-        + html + '</div>',
-        unsafe_allow_html=True
-    )
+    return annotations[:2]
 
 
 def detect_momentum_exhaustion(df_15m, df_5m):
@@ -705,7 +668,7 @@ def build_chart(df, ema_series, bb_u, bb_l, bb_m,
                 rsi_s, macd_l, macd_sig, macd_hist,
                 stoch_k, stoch_d,
                 sr_levels, ms_peaks, ms_troughs, rec, name,
-                vwap=None, tf_label="4H"):
+                vwap=None, tf_label="4H", pattern_annotations=None):
     n=100; dp=df.tail(n).copy(); idx=dp.index
 
     fig = make_subplots(
@@ -754,26 +717,44 @@ def build_chart(df, ema_series, bb_u, bb_l, bb_m,
         fig.add_trace(go.Scatter(x=dp["ts"], y=vwap.loc[idx], name="VWAP",
             line=dict(color="#FF00FF", width=1.5, dash="dot")), row=1, col=1)
 
-    # ── 지지저항
-    for lv,lt in sr_levels[:6]:
-        c = "rgba(232,93,93,0.6)" if lt=="저항" else "rgba(93,232,160,0.6)"
+    # ── 지지저항 (상위 4개만)
+    for lv,lt in sr_levels[:4]:
+        c = "rgba(232,93,93,0.55)" if lt=="저항" else "rgba(93,232,160,0.55)"
         fig.add_hline(y=lv,line_color=c,line_dash="dash",line_width=1,
             annotation_text=f"  {lt} ${lv:,.0f}",
             annotation_font_size=9,annotation_font_color=c,row=1,col=1)
 
-    # ── 시장 구조 스윙 포인트
-    if len(ms_peaks)>0:
-        ph = df["high"].values[-80:]; pt = df["ts"].values[-80:]
-        for i in ms_peaks[-3:]:
-            if i<len(pt):
-                fig.add_annotation(x=pt[i],y=ph[i],text="▼",showarrow=False,
-                    font=dict(color="#e85d5d",size=10),yanchor="bottom",row=1,col=1)
-    if len(ms_troughs)>0:
-        pl = df["low"].values[-80:]; pt = df["ts"].values[-80:]
-        for i in ms_troughs[-3:]:
-            if i<len(pt):
-                fig.add_annotation(x=pt[i],y=pl[i],text="▲",showarrow=False,
-                    font=dict(color="#5de8a0",size=10),yanchor="top",row=1,col=1)
+    # ── 패턴 마킹 (피벗 포인트 + 넥라인 + 목표가)
+    if pattern_annotations:
+        for ann in pattern_annotations[:2]:
+            mc = ann["marker_color"]
+            anc = ann["anchor"]
+            # 피벗 포인트 마커
+            px = [p[0] for p in ann["pivots"]]
+            py = [p[1] for p in ann["pivots"]]
+            pt_labels = [p[2] for p in ann["pivots"]]
+            fig.add_trace(go.Scatter(
+                x=px, y=py, mode="markers+text",
+                text=pt_labels, textposition=anc,
+                marker=dict(symbol="diamond", size=11, color=mc,
+                            line=dict(color="#fff", width=1)),
+                name=ann["name"], showlegend=True,
+                textfont=dict(color=mc, size=11),
+            ), row=1, col=1)
+            # 넥라인
+            if ann["neckline"]:
+                nk_col = "#e8c85d"
+                fig.add_hline(y=ann["neckline"], line_color=nk_col,
+                    line_dash="dashdot", line_width=1.5,
+                    annotation_text=f"  넥라인 ${ann['neckline']:,.0f}",
+                    annotation_font_color=nk_col, annotation_font_size=9, row=1, col=1)
+            # 목표가
+            if ann["target"]:
+                tg_col = mc
+                fig.add_hline(y=ann["target"], line_color=tg_col,
+                    line_dash="dot", line_width=1,
+                    annotation_text=f"  목표 ${ann['target']:,.0f}",
+                    annotation_font_color=tg_col, annotation_font_size=9, row=1, col=1)
 
     # ── TP/SL 라인
     if rec:
@@ -794,13 +775,9 @@ def build_chart(df, ema_series, bb_u, bb_l, bb_m,
     fig.add_trace(go.Bar(x=dp["ts"],y=dp["volume"],marker_color=vc,
         name="거래량",showlegend=False), row=2, col=1)
 
-    # ── RSI + Stoch RSI
+    # ── RSI (Stoch RSI 차트에서 제거 — 신호 그리드에서 확인)
     fig.add_trace(go.Scatter(x=dp["ts"],y=rsi_s.loc[idx],name="RSI",
         line=dict(color="#DDA0DD",width=1.5)), row=3, col=1)
-    fig.add_trace(go.Scatter(x=dp["ts"],y=stoch_k.loc[idx]*100,name="Stoch K",
-        line=dict(color="#5de8a0",width=1,dash="dot")), row=3, col=1)
-    fig.add_trace(go.Scatter(x=dp["ts"],y=stoch_d.loc[idx]*100,name="Stoch D",
-        line=dict(color="#e85d5d",width=1,dash="dot")), row=3, col=1)
     for y,c in [(70,"rgba(232,93,93,0.4)"),(30,"rgba(93,232,160,0.4)"),(50,"rgba(150,150,150,0.2)")]:
         fig.add_hline(y=y,line_dash="dash",line_color=c,line_width=1,row=3,col=1)
     fig.add_hrect(y0=70,y1=100,fillcolor="rgba(232,93,93,0.05)",row=3,col=1,line_width=0)
@@ -1407,7 +1384,11 @@ def render_scalp_decision_card(result, symbol):
     )
 
     # 패턴 카드 (ASCII 모양 + 가격 레벨)
-    render_pattern_card(result.get("chart_patterns", []), price)
+    # 패턴 요약 (차트에 직접 마킹 — 여기서는 간단 텍스트만)
+    patterns = result.get("chart_patterns", [])
+    if patterns:
+        p_str = " · ".join(f'**{p["tf"]} {p["name"]}**' for p in patterns[:2])
+        st.caption(f"📊 {p_str} 감지 — 차트에서 ◆ 마커 확인")
 
     html = (
         '<div style="background:' + bg + ';border:2px solid ' + bd + ';border-radius:14px;'
@@ -1554,7 +1535,7 @@ def render_analysis_scalp(symbol, display, funding_rate, btc_direction=None):
               "롱과열" if funding_rate*100 > 0.05 else ("숏과열" if funding_rate*100 < -0.05 else "중립"))
 
     with st.expander("📈 15분 차트 & 지표 신호", expanded=False):
-        ema_s, ema_d, ema_ser = calc_ema(df_15m, periods=(9, 21, 50, 100))
+        ema_s, ema_d, ema_ser = calc_ema(df_15m, periods=(9, 21, 50))
         bb_s, bb_d, bb_u, bb_l, bb_m = calc_bb(df_15m)
         rsi_s, rsi_d, _, rsi_ser = calc_rsi(df_15m)
         macd_s, macd_d, ml, msl, mhl = calc_macd(df_15m)
@@ -1563,6 +1544,7 @@ def render_analysis_scalp(symbol, display, funding_rate, btc_direction=None):
         vol_s, vol_d = calc_volume(df_15m)
         fun_s, fun_d = calc_funding(funding_rate)
         sr_levels = find_sr_levels(df_15m, price)
+        pat_annotations = get_pattern_chart_annotations(df_15m, price)
 
         # 지표 신호 그리드 (차트 위에)
         render_signal_grid([
@@ -1590,7 +1572,8 @@ def render_analysis_scalp(symbol, display, funding_rate, btc_direction=None):
                           None, None, None, None,
                           rsi_ser, ml, msl, mhl, sk, sd,
                           sr_levels, [], [], chart_rec, display,
-                          vwap=vwap_ser, tf_label="15분")
+                          vwap=vwap_ser, tf_label="15분",
+                          pattern_annotations=pat_annotations)
         st.plotly_chart(fig, use_container_width=True,
                         config={"responsive": True, "displayModeBar": False})
 
