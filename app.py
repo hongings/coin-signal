@@ -643,6 +643,18 @@ def get_pattern_chart_annotations(df, price, lookback=100):
     for ann in annotations:
         ann["stage"], ann["stage_label"], ann["action"] = _pattern_stage(ann, price)
 
+    # ── 무효화된 패턴 제거 (현재가가 fail 레벨 돌파)
+    valid = []
+    for ann in annotations:
+        fail = ann.get("fail")
+        if fail is None:
+            valid.append(ann)
+        elif ann["bias"] == "bull" and price >= fail:   # 상승패턴: 저점 fail 위에 있으면 유효
+            valid.append(ann)
+        elif ann["bias"] == "bear" and price <= fail:   # 하락패턴: 고점 fail 아래에 있으면 유효
+            valid.append(ann)
+    annotations = valid
+
     return annotations[:2]
 
 
@@ -706,6 +718,61 @@ def _pattern_stage(ann, price):
             return 2, "하락 진행 중", f"목표가 ${tg:,.0f} 향해 진행 중" if tg else "목표가 향해 진행 중"
 
     return 0, "패턴 형성 중", "추가 확인 대기"
+
+
+def detect_candle_pattern(df, lookback=5):
+    """
+    핀바 / 인사이드바 / 불리시·베어리시 인걸핑 감지.
+    Returns {"pattern": str, "bias": "bull"/"bear"/"", "label": str}
+    """
+    if df is None or len(df) < 3:
+        return {"pattern": "", "bias": "", "label": ""}
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    body      = abs(last["close"] - last["open"])
+    full_range = last["high"] - last["low"]
+    if full_range == 0:
+        return {"pattern": "", "bias": "", "label": ""}
+    upper_wick = last["high"] - max(last["open"], last["close"])
+    lower_wick = min(last["open"], last["close"]) - last["low"]
+    body_ratio = body / full_range
+
+    # 핀바 (상승): 아랫꼬리 >= 몸통 2배, 윗꼬리 작음
+    if lower_wick >= body * 2 and upper_wick <= body * 0.5 and body_ratio < 0.35:
+        return {"pattern": "핀바(상승)", "bias": "bull", "label": "📌 핀바 — 하락 거부, 상승 반전 가능"}
+    # 핀바 (하락): 윗꼬리 >= 몸통 2배, 아랫꼬리 작음
+    if upper_wick >= body * 2 and lower_wick <= body * 0.5 and body_ratio < 0.35:
+        return {"pattern": "핀바(하락)", "bias": "bear", "label": "📌 핀바 — 상승 거부, 하락 반전 가능"}
+
+    prev_body = abs(prev["close"] - prev["open"])
+    # 불리시 인걸핑: 이전 음봉을 양봉이 완전히 감쌈
+    if (last["close"] > last["open"] and prev["close"] < prev["open"]
+            and last["open"] <= prev["close"] and last["close"] >= prev["open"]
+            and body >= prev_body * 1.0):
+        return {"pattern": "불리시인걸핑", "bias": "bull", "label": "🕯 불리시 인걸핑 — 강한 매수 전환"}
+    # 베어리시 인걸핑: 이전 양봉을 음봉이 완전히 감쌈
+    if (last["close"] < last["open"] and prev["close"] > prev["open"]
+            and last["open"] >= prev["close"] and last["close"] <= prev["open"]
+            and body >= prev_body * 1.0):
+        return {"pattern": "베어리시인걸핑", "bias": "bear", "label": "🕯 베어리시 인걸핑 — 강한 매도 전환"}
+
+    return {"pattern": "", "bias": "", "label": ""}
+
+
+def detect_rsi_divergence(df):
+    """
+    15분봉 RSI 다이버전스 감지.
+    Returns {"divergence": "bull"/"bear"/"", "label": str, "score": float}
+    """
+    if df is None or len(df) < 30:
+        return {"divergence": "", "label": "", "score": 0.0}
+    rsi_ser = ta.momentum.RSIIndicator(df["close"].tail(60), window=14).rsi()
+    score, label = _divergence(df["close"].tail(60).values, rsi_ser.values)
+    if score > 0:
+        return {"divergence": "bull", "label": label, "score": score}
+    elif score < 0:
+        return {"divergence": "bear", "label": label, "score": abs(score)}
+    return {"divergence": "", "label": "", "score": 0.0}
 
 
 def detect_momentum_exhaustion(df_15m, df_5m):
@@ -1391,8 +1458,51 @@ def scalp_decision_engine(df_4h, df_1h, df_15m, df_5m, funding_rate, btc_directi
     else:
         pattern_dominant = "neutral"  # 동점 → 불확실
 
+    # ── 멀티 TF RSI 정렬 (4H / 1H / 15m)
+    def _rsi_val(df_):
+        try:
+            return ta.momentum.RSIIndicator(df_["close"].tail(50), window=14).rsi().iloc[-1]
+        except Exception:
+            return 50.0
+
+    rsi_4h  = _rsi_val(df_4h)
+    rsi_1h  = _rsi_val(df_1h)
+    rsi_15m_val = _rsi_val(df_15m)
+
+    # 방향: >55 bull, <45 bear, 45~55 neutral
+    def _rsi_dir(v):
+        if v > 55: return "bull"
+        if v < 45: return "bear"
+        return "neutral"
+
+    rsi_dirs = [_rsi_dir(rsi_4h), _rsi_dir(rsi_1h), _rsi_dir(rsi_15m_val)]
+    bull_tf  = rsi_dirs.count("bull")
+    bear_tf  = rsi_dirs.count("bear")
+
+    if bull_tf == 3:
+        rsi_align = "strong_bull"
+        rsi_align_label = f"✅ RSI 전 TF 상승 ({rsi_4h:.0f}/{rsi_1h:.0f}/{rsi_15m_val:.0f})"
+    elif bear_tf == 3:
+        rsi_align = "strong_bear"
+        rsi_align_label = f"✅ RSI 전 TF 하락 ({rsi_4h:.0f}/{rsi_1h:.0f}/{rsi_15m_val:.0f})"
+    elif bull_tf >= 2:
+        rsi_align = "bull"
+        rsi_align_label = f"↗ RSI 2/3 상승 ({rsi_4h:.0f}/{rsi_1h:.0f}/{rsi_15m_val:.0f})"
+    elif bear_tf >= 2:
+        rsi_align = "bear"
+        rsi_align_label = f"↘ RSI 2/3 하락 ({rsi_4h:.0f}/{rsi_1h:.0f}/{rsi_15m_val:.0f})"
+    else:
+        rsi_align = "mixed"
+        rsi_align_label = f"↔ RSI 혼재 ({rsi_4h:.0f}/{rsi_1h:.0f}/{rsi_15m_val:.0f})"
+
     # ── 모멘텀 소진 감지
     momentum = detect_momentum_exhaustion(df_15m, df_5m)
+
+    # ── 캔들 패턴 (15m 마지막 캔들)
+    candle_pat = detect_candle_pattern(df_15m)
+
+    # ── RSI 다이버전스 (15m)
+    rsi_div = detect_rsi_divergence(df_15m)
 
     # ── S/R 접근 감지 (0.8%~1.5% 이내)
     approaching_zone = False
@@ -1459,10 +1569,15 @@ def scalp_decision_engine(df_4h, df_1h, df_15m, df_5m, funding_rate, btc_directi
             trigger_label = "⏳ 반응 대기 중"
 
     steps = [direction_label, structure_label, zone_label, trigger_label]
+    steps.append(rsi_align_label)
     if btc_conflict_label:
         steps.append(btc_conflict_label)
     if momentum["exhausted"]:
         steps.append(momentum["label"])
+    if candle_pat["bias"]:
+        steps.append(candle_pat["label"])
+    if rsi_div["divergence"]:
+        steps.append(rsi_div["label"])
 
     # ── Decision logic
     sl = tp1 = tp2 = rr1 = rr2 = invalidation = None
@@ -1583,6 +1698,15 @@ def scalp_decision_engine(df_4h, df_1h, df_15m, df_5m, funding_rate, btc_directi
                 decision = "NO TRADE"
                 reason = f"RSI 과매도 ({rsi_entry:.0f}) — 저점 추격 금지"
                 sl = tp1 = tp2 = rr1 = rr2 = None
+            elif rsi_align == "mixed":
+                decision = "NO TRADE"
+                reason = f"RSI 혼재 — TF 간 방향 불일치 ({rsi_4h:.0f}/{rsi_1h:.0f}/{rsi_15m_val:.0f}), 관망"
+                sl = tp1 = tp2 = rr1 = rr2 = None
+            elif (is_long and rsi_align in ("bear", "strong_bear")) or \
+                 (not is_long and rsi_align in ("bull", "strong_bull")):
+                decision = "NO TRADE"
+                reason = f"RSI 방향 충돌 — {rsi_align_label}"
+                sl = tp1 = tp2 = rr1 = rr2 = None
             else:
                 decision = trade_direction
                 reason = f"{zone_type} 구간 반응 확인 — {trigger_detail}"
@@ -1621,6 +1745,10 @@ def scalp_decision_engine(df_4h, df_1h, df_15m, df_5m, funding_rate, btc_directi
         btc_conflict=btc_conflict,
         btc_conflict_label=btc_conflict_label,
         chart_patterns=chart_patterns,
+        rsi_align=rsi_align,
+        rsi_align_label=rsi_align_label,
+        candle_pat=candle_pat,
+        rsi_div=rsi_div,
         pattern_dominant=pattern_dominant,
         pattern_bull_score=pattern_bull_score,
         pattern_bear_score=pattern_bear_score,
