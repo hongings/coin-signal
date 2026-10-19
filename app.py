@@ -1538,6 +1538,15 @@ def scalp_decision_engine(df_4h, df_1h, df_15m, df_5m, funding_rate, btc_directi
                 decision = "NO TRADE"
                 reason = f"손익비 부족 (R:R {rr1:.1f})"
                 sl = tp1 = tp2 = rr1 = rr2 = None
+            elif any(p["bias"] == ("bear" if is_long else "bull") for p in chart_patterns):
+                # ── 차트 패턴이 진입 방향과 반대 → 즉시 차단
+                conflict = next(p for p in chart_patterns
+                                if p["bias"] == ("bear" if is_long else "bull"))
+                bias_kr = "상승 반전" if conflict["bias"] == "bull" else "하락 반전"
+                decision = "NO TRADE"
+                reason = (f"패턴 충돌 — {conflict['tf']} {conflict['name']} "
+                          f"({bias_kr} 진행 중) · 역방향 진입 금지")
+                sl = tp1 = tp2 = rr1 = rr2 = None
             elif (momentum["exhausted"] and
                   momentum["direction"] == ("bull" if is_long else "bear")):
                 # ── 같은 방향 모멘텀 소진 → 추격 금지
