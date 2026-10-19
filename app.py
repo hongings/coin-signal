@@ -1379,8 +1379,17 @@ def scalp_decision_engine(df_4h, df_1h, df_15m, df_5m, funding_rate, btc_directi
             else:
                 zone_label = f"📍 저항구간 ${zone_price:,.0f} {_strength_dots(zone_strength_map.get(zone_price, 1))}"
 
-    # ── 차트 패턴 감지
+    # ── 차트 패턴 감지 + 방향 점수화 (TF 가중치: 4H=3, 1H=2, 15m=1)
     chart_patterns = detect_chart_patterns(df_4h, df_1h, df_15m, price)
+    _tf_w = {"4H": 3, "1H": 2, "15m": 1}
+    pattern_bull_score = sum(_tf_w.get(p["tf"], 1) for p in chart_patterns if p["bias"] == "bull")
+    pattern_bear_score = sum(_tf_w.get(p["tf"], 1) for p in chart_patterns if p["bias"] == "bear")
+    if pattern_bull_score > pattern_bear_score:
+        pattern_dominant = "bull"
+    elif pattern_bear_score > pattern_bull_score:
+        pattern_dominant = "bear"
+    else:
+        pattern_dominant = "neutral"  # 동점 → 불확실
 
     # ── 모멘텀 소진 감지
     momentum = detect_momentum_exhaustion(df_15m, df_5m)
@@ -1538,14 +1547,23 @@ def scalp_decision_engine(df_4h, df_1h, df_15m, df_5m, funding_rate, btc_directi
                 decision = "NO TRADE"
                 reason = f"손익비 부족 (R:R {rr1:.1f})"
                 sl = tp1 = tp2 = rr1 = rr2 = None
-            elif any(p["bias"] == ("bear" if is_long else "bull") for p in chart_patterns):
-                # ── 차트 패턴이 진입 방향과 반대 → 즉시 차단
-                conflict = next(p for p in chart_patterns
-                                if p["bias"] == ("bear" if is_long else "bull"))
-                bias_kr = "상승 반전" if conflict["bias"] == "bull" else "하락 반전"
+            elif chart_patterns and pattern_dominant == "neutral":
+                # ── 상승/하락 패턴 점수 동점 → 방향 불확실
+                p_names = " vs ".join(f"{p['tf']} {p['name']}" for p in chart_patterns[:2])
                 decision = "NO TRADE"
-                reason = (f"패턴 충돌 — {conflict['tf']} {conflict['name']} "
-                          f"({bias_kr} 진행 중) · 역방향 진입 금지")
+                reason = f"패턴 충돌 동점 ({p_names}) — 방향 불확실, 관망"
+                sl = tp1 = tp2 = rr1 = rr2 = None
+            elif chart_patterns and pattern_dominant == ("bear" if is_long else "bull"):
+                # ── 우세 패턴이 진입 방향과 반대
+                dominant_pats = [p for p in chart_patterns
+                                 if p["bias"] == pattern_dominant]
+                dp = dominant_pats[0]
+                bias_kr = "상승 반전" if dp["bias"] == "bull" else "하락 반전"
+                score = pattern_bull_score if dp["bias"] == "bull" else pattern_bear_score
+                opp   = pattern_bear_score if dp["bias"] == "bull" else pattern_bull_score
+                decision = "NO TRADE"
+                reason = (f"패턴 우세 충돌 — {dp['tf']} {dp['name']} ({bias_kr}, "
+                          f"점수 {score} vs {opp}) · 역방향 진입 금지")
                 sl = tp1 = tp2 = rr1 = rr2 = None
             elif (momentum["exhausted"] and
                   momentum["direction"] == ("bull" if is_long else "bear")):
@@ -1603,6 +1621,9 @@ def scalp_decision_engine(df_4h, df_1h, df_15m, df_5m, funding_rate, btc_directi
         btc_conflict=btc_conflict,
         btc_conflict_label=btc_conflict_label,
         chart_patterns=chart_patterns,
+        pattern_dominant=pattern_dominant,
+        pattern_bull_score=pattern_bull_score,
+        pattern_bear_score=pattern_bear_score,
         momentum=momentum,
         approaching_zone=approaching_zone,
         approach_price=approach_price,
