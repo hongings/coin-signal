@@ -1579,56 +1579,130 @@ def scalp_decision_engine(df_4h, df_1h, df_15m, df_5m, funding_rate, btc_directi
     if rsi_div["divergence"]:
         steps.append(rsi_div["label"])
 
-    # ── Decision logic
+    # ══════════════════════════════════════════════
+    # ── 가중치 점수제 결정 엔진
+    # ══════════════════════════════════════════════
     sl = tp1 = tp2 = rr1 = rr2 = invalidation = None
     entry_zone = None
 
-    if direction == "neutral" and not at_zone:
+    # ── 하드 게이트 1: 고변동성
+    if regime == "HIGH_VOLATILITY":
         decision = "NO TRADE"
-        reason = "4H 방향 불명확, 주요 구간 없음"
-    elif direction != "neutral" and not aligned and not at_zone:
+        reason = "고변동성 — 손절 폭 불안정, 관망"
+    # ── 하드 게이트 2: 4H 방향 불명확
+    elif direction == "neutral":
         decision = "NO TRADE"
-        reason = "상위/하위 시간봉 방향 불일치"
-    elif at_zone and not trigger_ok:
+        reason = "4H 추세 방향 불명확 — 횡보 관망"
+    # ── 하드 게이트 3: S/R 구간 없음
+    elif not at_zone:
         decision = "WAIT"
-        reason = "구간 도달 — 5분봉 반응 확인 대기"
-        entry_zone = (zone_price * 0.997, zone_price * 1.003) if zone_price else None
-        # Projected entry for WAIT
-        if zone_price is not None:
-            proj_entry = zone_price
-            is_long_proj = zone_type == "지지"
-            sr_proj = find_sr_levels(df_15m, proj_entry)
-            sl_proj, _ = get_atr_stop(df_15m, proj_entry, is_long_proj, sr_proj, mult=0.8)
-            sups_proj = sorted([(lv, t) for lv, t in sr_proj if lv < proj_entry], reverse=True)
-            ress_proj = sorted([(lv, t) for lv, t in sr_proj if lv > proj_entry])
-            risk_proj = proj_entry - sl_proj if is_long_proj else sl_proj - proj_entry
-            tp1_proj = (ress_proj[0][0] if ress_proj else proj_entry + risk_proj * 2.0) if is_long_proj else (sups_proj[0][0] if sups_proj else proj_entry - risk_proj * 2.0)
-            projected_trade = {
-                "entry": proj_entry,
-                "sl": sl_proj,
-                "tp1": tp1_proj,
-                "direction": "LONG" if is_long_proj else "SHORT",
-            }
-    elif at_zone and trigger_ok:
-        # Determine trade direction from zone type
-        if zone_type == "지지":
+        reason = "주요 구간 접근 대기"
+    else:
+        # ── 점수 계산
+        sig = 0.0
+        sig_log = []
+
+        # 1) 4H 추세 방향 (±3)
+        if direction == "bull":
+            sig += 3; sig_log.append(("4H 상승 추세", +3))
+        else:
+            sig -= 3; sig_log.append(("4H 하락 추세", -3))
+
+        # 2) 1H 구조 정렬 (±2 / -1)
+        if aligned:
+            delta = 2 if direction == "bull" else -2
+            sig += delta; sig_log.append(("1H 방향 일치", delta))
+        else:
+            delta = -1 if direction == "bull" else 1
+            sig += delta; sig_log.append(("1H 방향 불일치", delta))
+
+        # 3) S/R 구간 방향성 (±2)
+        if (direction == "bull" and zone_type == "지지") or \
+           (direction == "bear" and zone_type == "저항"):
+            delta = 2 if direction == "bull" else -2
+            sig += delta; sig_log.append((f"{zone_type} 구간 진입", delta))
+        else:
+            delta = -1 if direction == "bull" else 1
+            sig += delta; sig_log.append(("역방향 구간", delta))
+
+        # 4) 5m 반응 캔들 (±2) — 없어도 진행, 있으면 가중
+        if trigger_ok:
+            delta = 2 if direction == "bull" else -2
+            sig += delta; sig_log.append((f"5m 반응 확인", delta))
+
+        # 5) RSI 15m 상태 (±1)
+        if rsi_15m_val < 40:
+            sig += 1; sig_log.append((f"RSI {rsi_15m_val:.0f} 저점권", +1))
+        elif rsi_15m_val > 60:
+            sig -= 1; sig_log.append((f"RSI {rsi_15m_val:.0f} 고점권", -1))
+
+        # 6) RSI 다이버전스 (±2)
+        if rsi_div["divergence"] == "bull":
+            sig += 2; sig_log.append(("불리시 RSI 다이버전스", +2))
+        elif rsi_div["divergence"] == "bear":
+            sig -= 2; sig_log.append(("베어리시 RSI 다이버전스", -2))
+
+        # 7) 캔들 패턴 (±2)
+        if candle_pat["bias"] == "bull":
+            sig += 2; sig_log.append((candle_pat["pattern"], +2))
+        elif candle_pat["bias"] == "bear":
+            sig -= 2; sig_log.append((candle_pat["pattern"], -2))
+
+        # 8) 차트 패턴 우세 (±2)
+        if pattern_dominant == "bull":
+            sig += 2; sig_log.append(("차트 패턴 상승 우세", +2))
+        elif pattern_dominant == "bear":
+            sig -= 2; sig_log.append(("차트 패턴 하락 우세", -2))
+
+        # 9) 모멘텀 소진 → 역방향 신호 (±1)
+        if momentum["exhausted"]:
+            if momentum["direction"] == "bear":
+                sig += 1; sig_log.append(("하락 소진 → 반전 가능", +1))
+            else:
+                sig -= 1; sig_log.append(("상승 소진 → 반전 가능", -1))
+
+        # 10) BTC 충돌 패널티 (ETH만)
+        if btc_conflict:
+            delta = -1 if direction == "bull" else 1
+            sig += delta; sig_log.append(("BTC 방향 충돌", delta))
+
+        THRESHOLD = 6  # 최대 16점 중 6점 이상
+
+        # 방향 결정: 점수 부호로 확정 (4H 방향과 다른 방향엔 절대 진입 안 함)
+        if sig >= THRESHOLD and direction == "bull":
             trade_direction = "LONG"
-        else:
+        elif sig <= -THRESHOLD and direction == "bear":
             trade_direction = "SHORT"
-
-        # High volatility override
-        if regime == "HIGH_VOLATILITY":
-            decision = "NO TRADE"
-            reason = "고변동성 — 손절 폭 계산 불안정. 변동성 완화 후 진입"
+        elif sig >= THRESHOLD and direction == "bear":
+            # 점수는 bull인데 4H는 bear → 역추세, 신호 주되 약하게
+            trade_direction = "LONG"
+        elif sig <= -THRESHOLD and direction == "bull":
+            trade_direction = "SHORT"
         else:
+            # 임계값 미달 → WAIT
+            decision = "WAIT"
+            reason = f"신호 강도 부족 (점수 {sig:+.0f} / 임계값 ±{THRESHOLD}) — 추가 확인 대기"
+            entry_zone = (zone_price * 0.997, zone_price * 1.003) if zone_price else None
+            # projected trade
+            if zone_price is not None:
+                proj_entry  = zone_price
+                is_long_proj = zone_type == "지지"
+                sr_proj     = find_sr_levels(df_15m, proj_entry)
+                sl_proj, _  = get_atr_stop(df_15m, proj_entry, is_long_proj, sr_proj, mult=0.8)
+                sups_proj   = sorted([(lv, t) for lv, t in sr_proj if lv < proj_entry], reverse=True)
+                ress_proj   = sorted([(lv, t) for lv, t in sr_proj if lv > proj_entry])
+                risk_proj   = proj_entry - sl_proj if is_long_proj else sl_proj - proj_entry
+                tp1_proj    = (ress_proj[0][0] if ress_proj else proj_entry + risk_proj * 2.0) \
+                              if is_long_proj else \
+                              (sups_proj[0][0] if sups_proj else proj_entry - risk_proj * 2.0)
+                projected_trade = {
+                    "entry": proj_entry, "sl": sl_proj, "tp1": tp1_proj,
+                    "direction": "LONG" if is_long_proj else "SHORT",
+                }
+            trade_direction = None
+
+        if trade_direction is not None:
             is_long = trade_direction == "LONG"
-
-            # ── 15분봉 현재 RSI (진입 시점 과열 여부)
-            try:
-                rsi_entry = ta.momentum.RSIIndicator(df_15m["close"].tail(50), window=14).rsi().iloc[-1]
-            except Exception:
-                rsi_entry = 50.0
-
             sr_levels_15m = find_sr_levels(df_15m, price)
             sl, _ = get_atr_stop(df_15m, price, is_long, sr_levels_15m, mult=0.8)
 
@@ -1644,78 +1718,29 @@ def scalp_decision_engine(df_4h, df_1h, df_15m, df_5m, funding_rate, btc_directi
                 tp1 = sups[0][0] if sups else price - risk * 2.0
                 tp2 = sups[1][0] if len(sups) > 1 else price - risk * 3.5
 
-            # Fee + slippage (Bybit taker 0.055% × 2 + slippage 0.05%) = 0.16% round trip
             fee_rate = 0.0016
             net_gain_tp1 = abs(tp1 - price) - price * fee_rate
-            net_loss = abs(price - sl) + price * fee_rate
+            net_loss     = abs(price - sl)  + price * fee_rate
             rr1 = net_gain_tp1 / net_loss if net_loss > 0 else 0
             net_gain_tp2 = abs(tp2 - price) - price * fee_rate
             rr2 = net_gain_tp2 / net_loss if net_loss > 0 else 0
 
-            # Minimum profit filter: TP1 must be > 0.3% from entry (fee erosion prevention)
             tp1_pct = abs(tp1 - price) / price
             if tp1_pct < 0.003:
                 decision = "NO TRADE"
-                reason = f"목표가 근접 — TP1 +{tp1_pct*100:.2f}% (수수료 {0.16:.2f}% 미달)"
+                reason = f"목표가 근접 — TP1 +{tp1_pct*100:.2f}% (수수료 미달)"
                 sl = tp1 = tp2 = rr1 = rr2 = None
             elif rr1 < 1.5:
                 decision = "NO TRADE"
                 reason = f"손익비 부족 (R:R {rr1:.1f})"
                 sl = tp1 = tp2 = rr1 = rr2 = None
-            elif chart_patterns and pattern_dominant == "neutral":
-                # ── 상승/하락 패턴 점수 동점 → 방향 불확실
-                p_names = " vs ".join(f"{p['tf']} {p['name']}" for p in chart_patterns[:2])
-                decision = "NO TRADE"
-                reason = f"패턴 충돌 동점 ({p_names}) — 방향 불확실, 관망"
-                sl = tp1 = tp2 = rr1 = rr2 = None
-            elif chart_patterns and pattern_dominant == ("bear" if is_long else "bull"):
-                # ── 우세 패턴이 진입 방향과 반대
-                dominant_pats = [p for p in chart_patterns
-                                 if p["bias"] == pattern_dominant]
-                dp = dominant_pats[0]
-                bias_kr = "상승 반전" if dp["bias"] == "bull" else "하락 반전"
-                score = pattern_bull_score if dp["bias"] == "bull" else pattern_bear_score
-                opp   = pattern_bear_score if dp["bias"] == "bull" else pattern_bull_score
-                decision = "NO TRADE"
-                reason = (f"패턴 우세 충돌 — {dp['tf']} {dp['name']} ({bias_kr}, "
-                          f"점수 {score} vs {opp}) · 역방향 진입 금지")
-                sl = tp1 = tp2 = rr1 = rr2 = None
-            elif (momentum["exhausted"] and
-                  momentum["direction"] == ("bull" if is_long else "bear")):
-                # ── 같은 방향 모멘텀 소진 → 추격 금지
-                cnt  = momentum["count"]
-                tf_m = momentum["tf"]
-                dir_kr = "상승" if is_long else "하락"
-                decision = "NO TRADE"
-                reason = (f"모멘텀 소진 — {tf_m} {dir_kr} {cnt}연속 후 추격 금지 "
-                          f"(이미 과진행, 반전 위험)")
-                sl = tp1 = tp2 = rr1 = rr2 = None
-            elif is_long and rsi_entry > 70:
-                decision = "NO TRADE"
-                reason = f"RSI 과매수 ({rsi_entry:.0f}) — 고점 추격 금지"
-                sl = tp1 = tp2 = rr1 = rr2 = None
-            elif not is_long and rsi_entry < 30:
-                decision = "NO TRADE"
-                reason = f"RSI 과매도 ({rsi_entry:.0f}) — 저점 추격 금지"
-                sl = tp1 = tp2 = rr1 = rr2 = None
-            elif rsi_align == "mixed":
-                decision = "NO TRADE"
-                reason = f"RSI 혼재 — TF 간 방향 불일치 ({rsi_4h:.0f}/{rsi_1h:.0f}/{rsi_15m_val:.0f}), 관망"
-                sl = tp1 = tp2 = rr1 = rr2 = None
-            elif (is_long and rsi_align in ("bear", "strong_bear")) or \
-                 (not is_long and rsi_align in ("bull", "strong_bull")):
-                decision = "NO TRADE"
-                reason = f"RSI 방향 충돌 — {rsi_align_label}"
-                sl = tp1 = tp2 = rr1 = rr2 = None
             else:
+                top3 = sorted(sig_log, key=lambda x: abs(x[1]), reverse=True)[:3]
+                reason_parts = " · ".join(f"{n}({v:+d})" for n, v in top3)
                 decision = trade_direction
-                reason = f"{zone_type} 구간 반응 확인 — {trigger_detail}"
+                reason = f"신호 점수 {sig:+.0f} — {reason_parts}"
                 invalidation = sl
                 entry_zone = (zone_price * 0.997, zone_price * 1.003) if zone_price else None
-    else:
-        # direction is clear but no zone nearby
-        decision = "WAIT"
-        reason = "주요 구간 접근 대기"
 
     return dict(
         decision=decision,
@@ -1745,6 +1770,8 @@ def scalp_decision_engine(df_4h, df_1h, df_15m, df_5m, funding_rate, btc_directi
         btc_conflict=btc_conflict,
         btc_conflict_label=btc_conflict_label,
         chart_patterns=chart_patterns,
+        sig_score=sig if at_zone and direction != "neutral" else 0,
+        sig_log=sig_log if at_zone and direction != "neutral" else [],
         rsi_align=rsi_align,
         rsi_align_label=rsi_align_label,
         candle_pat=candle_pat,
