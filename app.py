@@ -2309,10 +2309,26 @@ def render_swing_analysis(symbol, display, funding_rate):
     """스윙 분석 탭 — 주봉/일봉/3일봉 기반 워뇨띠 방식 분석"""
     with st.spinner(f"{display} 스윙 분석 중..."):
         df_weekly = fetch_ohlcv(symbol, "1w",  limit=100)
-        df_daily  = fetch_ohlcv(symbol, "1d",  limit=300)
-        df_3d     = fetch_ohlcv(symbol, "3d",  limit=100)
+        df_daily  = fetch_ohlcv(symbol, "1d",  limit=360)
         df_4h     = fetch_ohlcv(symbol, "4h",  limit=200)
         df_15m    = fetch_ohlcv(symbol, "15m", limit=100)
+
+    # OKX는 "3d" 미지원 → 일봉 데이터를 3일 단위로 리샘플링
+    df_3d = None
+    if df_daily is not None and len(df_daily) >= 30:
+        try:
+            _d = df_daily.copy()
+            _d = _d.set_index("ts")
+            _d3 = _d.resample("3D").agg({
+                "open":   "first",
+                "high":   "max",
+                "low":    "min",
+                "close":  "last",
+                "volume": "sum",
+            }).dropna().reset_index()
+            df_3d = _d3
+        except Exception:
+            df_3d = None
 
     if df_weekly is None or df_daily is None:
         st.error("데이터 로딩 실패")
