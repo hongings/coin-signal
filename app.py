@@ -812,6 +812,250 @@ def detect_momentum_exhaustion(df_15m, df_5m):
 
 
 # ══════════════════════════════════════════════
+# 스윙 분석 엔진
+# ══════════════════════════════════════════════
+
+def detect_bb_squeeze(df, window=20):
+    """BB 수축(스퀴즈) 감지 — 큰 움직임 임박 여부"""
+    if df is None or len(df) < window + 10:
+        return {"squeeze": False, "ratio": 1.0, "label": "데이터 부족", "direction_hint": "neutral"}
+    try:
+        bb = ta.volatility.BollingerBands(df["close"], window=window, window_dev=2)
+        bbu = bb.bollinger_hband()
+        bbl = bb.bollinger_lband()
+        bbm = bb.bollinger_mavg()
+        width = (bbu - bbl) / bbm
+        cur  = width.iloc[-1]
+        avg  = width.rolling(30).mean().iloc[-1]
+        ratio = cur / avg if avg > 0 else 1.0
+        squeeze = ratio < 0.6
+        # Direction hint from price position relative to BB mid
+        price = df["close"].iloc[-1]
+        mid   = bbm.iloc[-1]
+        direction_hint = "bull" if price > mid else "bear"
+        if squeeze:
+            label = f"⚡ BB 수축 — 큰 움직임 임박 (현재 {ratio*100:.0f}% / 평균 대비)"
+        elif ratio < 0.8:
+            label = f"🔶 BB 수축 진행 중 ({ratio*100:.0f}%)"
+        else:
+            label = f"BB 정상 ({ratio*100:.0f}%)"
+        return {"squeeze": squeeze, "ratio": ratio, "label": label,
+                "direction_hint": direction_hint, "bb_mid": float(mid),
+                "bb_upper": float(bbu.iloc[-1]), "bb_lower": float(bbl.iloc[-1])}
+    except Exception:
+        return {"squeeze": False, "ratio": 1.0, "label": "계산 오류", "direction_hint": "neutral"}
+
+
+def detect_weekly_gaps(df_weekly, price, lookback=60):
+    """주봉 빈공간(가격이 채우러 가는 구간) 탐지"""
+    if df_weekly is None or len(df_weekly) < 5:
+        return []
+    df = df_weekly.tail(lookback).reset_index(drop=True)
+    gaps = []
+    for i in range(1, len(df)):
+        prev = df.iloc[i - 1]
+        curr = df.iloc[i]
+        # 하방 갭 (이전봉 저가 > 현재봉 고가)
+        if prev["low"] > curr["high"]:
+            center = (prev["low"] + curr["high"]) / 2
+            gaps.append({"type": "down_gap", "high": float(prev["low"]),
+                         "low": float(curr["high"]), "center": center,
+                         "label": f"주봉 하방 빈공간 ${curr['high']:,.0f}~${prev['low']:,.0f}"})
+        # 상방 갭 (이전봉 고가 < 현재봉 저가)
+        if prev["high"] < curr["low"]:
+            center = (prev["high"] + curr["low"]) / 2
+            gaps.append({"type": "up_gap", "low": float(prev["high"]),
+                         "high": float(curr["low"]), "center": center,
+                         "label": f"주봉 상방 빈공간 ${prev['high']:,.0f}~${curr['low']:,.0f}"})
+    # 현재가 기준 위아래 가장 가까운 순으로 정렬
+    gaps = sorted(gaps, key=lambda x: abs(x["center"] - price))
+    return gaps[:4]
+
+
+def get_weekly_key_levels(df_weekly, df_daily, price, lookback_w=52, lookback_d=90):
+    """주봉/일봉 스윙 고저점 + 라운드넘버 핵심 레벨 반환"""
+    levels = []
+
+    for df, tf_name, lb in [(df_weekly, "주봉", lookback_w), (df_daily, "일봉", lookback_d)]:
+        if df is None or len(df) < 5:
+            continue
+        d = df.tail(lb)
+        h = d["high"].values
+        l = d["low"].values
+        prom_h = h.std() * (0.5 if tf_name == "주봉" else 0.3)
+        prom_l = l.std() * (0.5 if tf_name == "주봉" else 0.3)
+        peaks,   _ = find_peaks(h, distance=3, prominence=prom_h)
+        troughs, _ = find_peaks(-l, distance=3, prominence=prom_l)
+        for i in peaks[-4:]:
+            levels.append({"price": float(h[i]), "type": "저항", "tf": tf_name})
+        for i in troughs[-4:]:
+            levels.append({"price": float(l[i]), "type": "지지", "tf": tf_name})
+
+    # 라운드 넘버 (현재가 ±15% 범위 내 $1000 단위)
+    lo = price * 0.85
+    hi = price * 1.15
+    step = 1000 if price > 10000 else 100
+    rn = lo - (lo % step)
+    while rn <= hi:
+        if abs(rn - price) / price > 0.005:
+            levels.append({"price": rn, "type": "심리", "tf": "라운드"})
+        rn += step
+
+    # 중복 제거 (0.5% 이내)
+    merged = []
+    for lv in sorted(levels, key=lambda x: x["price"]):
+        if not merged or abs(lv["price"] - merged[-1]["price"]) / merged[-1]["price"] > 0.005:
+            merged.append(lv)
+
+    return sorted(merged, key=lambda x: abs(x["price"] - price))[:10]
+
+
+def detect_market_cycle(df_weekly, df_daily, price):
+    """
+    7단계 시장 사이클 감지 (워뇨띠 프레임워크 기반)
+    1: 최고점 형성  2: 1차 조정  3: 반등  4: 긴 하락
+    5: 큰 반등     6: 2차 조정  7: 대상승장
+    """
+    if df_weekly is None or len(df_weekly) < 30:
+        return {"stage": 0, "label": "분석 불가", "bias": "neutral", "desc": ""}
+
+    try:
+        w = df_weekly.tail(52)
+        # 52주 고저
+        w_high = w["high"].max()
+        w_low  = w["low"].min()
+        w_range = w_high - w_low
+        pos = (price - w_low) / w_range if w_range > 0 else 0.5
+
+        # 주봉 BB
+        bb_w = detect_bb_squeeze(df_weekly, window=20)
+
+        # 일봉 MA (50, 200)
+        ma50  = df_daily["close"].rolling(50).mean().iloc[-1]  if df_daily is not None and len(df_daily) >= 50  else price
+        ma200 = df_daily["close"].rolling(200).mean().iloc[-1] if df_daily is not None and len(df_daily) >= 200 else price
+
+        # 최근 4주 추세
+        recent_change = (w["close"].iloc[-1] - w["close"].iloc[-4]) / w["close"].iloc[-4]
+
+        # 사이클 판단
+        if pos > 0.90 and recent_change > 0.05:
+            stage, bias, desc = 1, "bear", "최고점 형성 구간 — 상승 과열, 조정 임박"
+        elif pos > 0.70 and recent_change < -0.05:
+            stage, bias, desc = 2, "bear", "1차 조정 — 고점 이탈, 하락 진행 중"
+        elif pos > 0.55 and recent_change > 0.02 and price < ma200:
+            stage, bias, desc = 3, "neutral", "1차 반등 — 추세 전환 미확인, 신중"
+        elif pos < 0.45 and price < ma50 and price < ma200:
+            stage, bias, desc = 4, "bear", "긴 하락 구간 — MA 아래 침체장"
+        elif pos < 0.30 and recent_change > 0.03:
+            stage, bias, desc = 5, "bull", "큰 반등 시작 — 저점권 반등, 주목"
+        elif 0.30 < pos < 0.55 and recent_change < -0.02:
+            stage, bias, desc = 6, "bull", "2차 조정 — 매수 기회 탐색 구간"
+        elif pos > 0.55 and price > ma50 and price > ma200 and recent_change > 0:
+            stage, bias, desc = 7, "bull", "대상승장 진입 — 강세 추세 확인"
+        else:
+            stage, bias, desc = 0, "neutral", "단계 불명확 — 추가 관망"
+
+        stage_emoji = {1:"🔴", 2:"🔴", 3:"🟡", 4:"🔴", 5:"🟢", 6:"🟢", 7:"🟢", 0:"⚪"}
+        label = f"{stage_emoji.get(stage,'⚪')} 사이클 {stage}단계" if stage > 0 else "⚪ 단계 불명확"
+        return {"stage": stage, "label": label, "bias": bias, "desc": desc, "pos_52w": pos}
+    except Exception:
+        return {"stage": 0, "label": "계산 오류", "bias": "neutral", "desc": ""}
+
+
+def swing_score_engine(df_weekly, df_daily, df_3d, df_4h, price):
+    """
+    스윙 방향 점수 엔진 (워뇨띠 방식 기반)
+    Returns: {"score": float, "direction": str, "details": list, "confidence": str}
+    """
+    sig = 0.0
+    log = []
+
+    # 1) 주봉 BB 위치 (±2)
+    bb_w = detect_bb_squeeze(df_weekly)
+    if bb_w["bb_upper"] and price > bb_w["bb_upper"]:
+        sig -= 2; log.append(("주봉 BB 상단 돌파 — 과열", -2))
+    elif price > bb_w.get("bb_mid", price):
+        sig += 1; log.append(("주봉 BB 중단 위", +1))
+    elif bb_w["bb_lower"] and price < bb_w["bb_lower"]:
+        sig += 2; log.append(("주봉 BB 하단 — 과매도 반등 가능", +2))
+    else:
+        sig -= 1; log.append(("주봉 BB 중단 아래", -1))
+
+    # 2) 주봉 BB 수축 방향 힌트 (±1)
+    if bb_w["squeeze"]:
+        hint = bb_w["direction_hint"]
+        delta = 1 if hint == "bull" else -1
+        sig += delta; log.append((f"주봉 BB 수축 → {hint} 방향 예상", delta))
+
+    # 3) 3일봉 MA10 / MA120 방향 (±2)
+    if df_3d is not None and len(df_3d) >= 120:
+        ma10  = df_3d["close"].rolling(10).mean().iloc[-1]
+        ma120 = df_3d["close"].rolling(120).mean().iloc[-1]
+        if price > ma10 > ma120:
+            sig += 2; log.append(("3일봉 MA10>MA120 — 상승 배열", +2))
+        elif price < ma10 < ma120:
+            sig -= 2; log.append(("3일봉 MA10<MA120 — 하락 배열", -2))
+        elif price > ma120:
+            sig += 1; log.append(("3일봉 MA120 위", +1))
+        else:
+            sig -= 1; log.append(("3일봉 MA120 아래", -1))
+
+    # 4) 일봉 MA50/MA200 (±2)
+    if df_daily is not None and len(df_daily) >= 200:
+        ma50_d  = df_daily["close"].rolling(50).mean().iloc[-1]
+        ma200_d = df_daily["close"].rolling(200).mean().iloc[-1]
+        if price > ma50_d and price > ma200_d:
+            sig += 2; log.append(("일봉 MA50/200 위 — 강세", +2))
+        elif price < ma50_d and price < ma200_d:
+            sig -= 2; log.append(("일봉 MA50/200 아래 — 약세", -2))
+        elif price > ma200_d:
+            sig += 1; log.append(("일봉 MA200 위", +1))
+        else:
+            sig -= 1; log.append(("일봉 MA200 아래", -1))
+
+    # 5) 주봉 RSI (±1)
+    if df_weekly is not None and len(df_weekly) >= 20:
+        try:
+            rsi_w = ta.momentum.RSIIndicator(df_weekly["close"].tail(30), window=14).rsi().iloc[-1]
+            if rsi_w < 40:
+                sig += 1; log.append((f"주봉 RSI {rsi_w:.0f} — 과매도", +1))
+            elif rsi_w > 65:
+                sig -= 1; log.append((f"주봉 RSI {rsi_w:.0f} — 과매수", -1))
+        except Exception:
+            pass
+
+    # 6) 시장 사이클 (±2)
+    cycle = detect_market_cycle(df_weekly, df_daily, price)
+    if cycle["bias"] == "bull":
+        sig += 2; log.append((f"{cycle['label']} — 상승 편향", +2))
+    elif cycle["bias"] == "bear":
+        sig -= 2; log.append((f"{cycle['label']} — 하락 편향", -2))
+
+    # 7) 4H 단기 추세 (±1, 보조)
+    if df_4h is not None and len(df_4h) >= 50:
+        ema9  = df_4h["close"].ewm(span=9).mean().iloc[-1]
+        ema21 = df_4h["close"].ewm(span=21).mean().iloc[-1]
+        if price > ema9 > ema21:
+            sig += 1; log.append(("4H EMA 상승 배열", +1))
+        elif price < ema9 < ema21:
+            sig -= 1; log.append(("4H EMA 하락 배열", -1))
+
+    # 방향 결정
+    if sig >= 4:
+        direction = "bull"
+        conf = "강한 상승" if sig >= 6 else "상승 우세"
+    elif sig <= -4:
+        direction = "bear"
+        conf = "강한 하락" if sig <= -6 else "하락 우세"
+    else:
+        direction = "neutral"
+        conf = "방향 불명확"
+
+    return {"score": sig, "direction": direction, "confidence": conf,
+            "details": log, "cycle": cycle, "bb_squeeze": bb_w}
+
+
+# ══════════════════════════════════════════════
 # 차트
 # ══════════════════════════════════════════════
 
@@ -2058,6 +2302,138 @@ def render_analysis_scalp(symbol, display, funding_rate, btc_direction=None):
 
 
 # ══════════════════════════════════════════════
+# 스윙 분석 렌더러
+# ══════════════════════════════════════════════
+
+def render_swing_analysis(symbol, display, funding_rate):
+    """스윙 분석 탭 — 주봉/일봉/3일봉 기반 워뇨띠 방식 분석"""
+    with st.spinner(f"{display} 스윙 분석 중..."):
+        df_weekly = fetch_ohlcv(symbol, "1w",  limit=100)
+        df_daily  = fetch_ohlcv(symbol, "1d",  limit=300)
+        df_3d     = fetch_ohlcv(symbol, "3d",  limit=100)
+        df_4h     = fetch_ohlcv(symbol, "4h",  limit=200)
+        df_15m    = fetch_ohlcv(symbol, "15m", limit=100)
+
+    if df_weekly is None or df_daily is None:
+        st.error("데이터 로딩 실패")
+        return
+
+    price  = df_daily["close"].iloc[-1]
+    change = (price - df_daily["close"].iloc[-2]) / df_daily["close"].iloc[-2] * 100
+
+    # ── 분석 실행
+    swing  = swing_score_engine(df_weekly, df_daily, df_3d, df_4h, price)
+    cycle  = swing["cycle"]
+    bb_sq  = swing["bb_squeeze"]
+    gaps   = detect_weekly_gaps(df_weekly, price)
+    levels = get_weekly_key_levels(df_weekly, df_daily, price)
+
+    # ── 방향 카드
+    is_bull   = swing["direction"] == "bull"
+    is_bear   = swing["direction"] == "bear"
+    dir_color = "#5de8a0" if is_bull else ("#e85d5d" if is_bear else "#aaaaaa")
+    dir_emoji = "📈" if is_bull else ("📉" if is_bear else "↔")
+    dir_kr    = "롱 우세" if is_bull else ("숏 우세" if is_bear else "방향 불명확")
+
+    st.markdown(f"""
+    <div style="background:rgba(255,255,255,0.04);border-radius:12px;padding:16px 20px;
+                border-left:4px solid {dir_color};margin-bottom:12px;">
+      <div style="font-size:11px;color:#888;letter-spacing:2px;margin-bottom:4px;">SWING DIRECTION</div>
+      <div style="font-size:28px;font-weight:800;color:{dir_color};">{dir_emoji} {dir_kr}</div>
+      <div style="font-size:13px;color:#ccc;margin-top:4px;">신호 점수 {swing['score']:+.0f} — {swing['confidence']}</div>
+      <div style="font-size:11px;color:#888;margin-top:6px;">{cycle['desc']}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── 메트릭 행
+    c1, c2, c3 = st.columns(3)
+    c1.metric(display, f"${price:,.2f}", f"{change:+.2f}%")
+    c2.metric("시장 사이클", cycle["label"])
+    c3.metric("BB 상태", "⚡ 수축" if bb_sq["squeeze"] else "정상", bb_sq["label"][:15])
+
+    # ── 점수 상세 (확장)
+    with st.expander("📊 점수 상세 보기", expanded=False):
+        for name, val in swing["details"]:
+            color = "#5de8a0" if val > 0 else "#e85d5d"
+            st.markdown(f"<span style='color:{color}'>{'+' if val>0 else ''}{val} &nbsp; {name}</span>", unsafe_allow_html=True)
+
+    # ── 핵심 레벨 테이블
+    st.markdown("#### 🗺️ 핵심 레벨")
+    if levels:
+        rows = []
+        for lv in sorted(levels, key=lambda x: x["price"], reverse=True)[:8]:
+            dist = (lv["price"] - price) / price * 100
+            t_color = "🔴" if lv["type"] == "저항" else ("🟢" if lv["type"] == "지지" else "⚪")
+            rows.append({
+                "레벨": f"${lv['price']:,.0f}",
+                "구분": f"{t_color} {lv['type']}",
+                "TF": lv["tf"],
+                "현재가 대비": f"{dist:+.1f}%",
+            })
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    # ── 주봉 빈공간
+    if gaps:
+        st.markdown("#### 📭 주봉 빈공간 (타겟 구간)")
+        for g in gaps[:3]:
+            direction_icon = "⬇️" if g["center"] < price else "⬆️"
+            dist = (g["center"] - price) / price * 100
+            st.info(f"{direction_icon} **{g['label']}** — 현재가 대비 {dist:+.1f}%")
+
+    # ── 주봉 차트
+    with st.expander("📈 주봉 차트", expanded=True):
+        fig = go.Figure()
+
+        # 캔들
+        dw = df_weekly.tail(52)
+        fig.add_trace(go.Candlestick(
+            x=dw["ts"], open=dw["open"], high=dw["high"], low=dw["low"], close=dw["close"],
+            name="주봉", increasing_line_color="#5de8a0", decreasing_line_color="#e85d5d",
+            increasing_fillcolor="#5de8a0", decreasing_fillcolor="#e85d5d", line_width=1,
+        ))
+
+        # BB
+        if len(df_weekly) >= 20:
+            bb = ta.volatility.BollingerBands(df_weekly["close"], window=20)
+            fig.add_trace(go.Scatter(x=dw["ts"], y=bb.bollinger_hband().loc[dw.index],
+                name="BB상단", line=dict(color="rgba(120,120,200,0.5)", width=1), showlegend=False))
+            fig.add_trace(go.Scatter(x=dw["ts"], y=bb.bollinger_lband().loc[dw.index],
+                name="BB하단", line=dict(color="rgba(120,120,200,0.5)", width=1),
+                fill="tonexty", fillcolor="rgba(120,120,200,0.05)", showlegend=False))
+            fig.add_trace(go.Scatter(x=dw["ts"], y=bb.bollinger_mavg().loc[dw.index],
+                name="BB중단", line=dict(color="rgba(120,120,200,0.3)", width=1, dash="dot"), showlegend=False))
+
+        # 핵심 레벨 수평선
+        for lv in levels[:6]:
+            c = "rgba(232,93,93,0.6)" if lv["type"] == "저항" else ("rgba(93,232,160,0.6)" if lv["type"] == "지지" else "rgba(200,200,200,0.3)")
+            fig.add_hline(y=lv["price"], line_color=c, line_dash="dash", line_width=1,
+                          annotation_text=f"  {lv['tf']} {lv['type']} ${lv['price']:,.0f}",
+                          annotation_font_size=9, annotation_font_color=c)
+
+        # 주봉 빈공간 음영
+        for g in gaps[:2]:
+            shade = "rgba(255,200,0,0.07)"
+            fig.add_hrect(y0=g["low"], y1=g["high"], fillcolor=shade, line_width=0,
+                          annotation_text=f"빈공간", annotation_font_size=8,
+                          annotation_font_color="rgba(255,200,0,0.6)")
+
+        # 현재가
+        fig.add_hline(y=price, line_color="rgba(255,255,255,0.6)", line_width=1,
+                      annotation_text=f"  현재 ${price:,.0f}", annotation_font_size=10)
+
+        pad = (dw["high"].max() - dw["low"].min()) * 0.05
+        fig.update_layout(
+            template="plotly_dark", height=480,
+            paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
+            xaxis_rangeslider_visible=False,
+            margin=dict(l=4, r=120, t=20, b=4),
+            title=dict(text=f"  {display} 주봉 차트 (52주)", font=dict(size=13), x=0),
+        )
+        fig.update_yaxes(range=[dw["low"].min() - pad, dw["high"].max() + pad])
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+
+# ══════════════════════════════════════════════
 # 시장 개요
 # ══════════════════════════════════════════════
 
@@ -2243,7 +2619,14 @@ st.divider()
 btc_fr = fetch_funding("BTC/USDT:USDT")
 eth_fr = fetch_funding("ETH/USDT:USDT")
 
-tab_trade, tab_market = st.tabs(["⚡ 단타 분석", "📊 시장 개요"])
+tab_swing, tab_trade, tab_market = st.tabs(["📊 스윙 분석", "⚡ 단타 분석", "📊 시장 개요"])
+
+with tab_swing:
+    sw1, sw2 = st.tabs(["₿ BTC", "Ξ ETH"])
+    with sw1:
+        render_swing_analysis("BTC/USDT:USDT", "BTC", btc_fr)
+    with sw2:
+        render_swing_analysis("ETH/USDT:USDT", "ETH", eth_fr)
 
 with tab_trade:
     # Macro warning
