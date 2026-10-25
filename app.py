@@ -2841,54 +2841,66 @@ with tab_swing:
         if not wonyo_msgs:
             st.warning("채널 글을 불러오지 못했습니다. 잠시 후 다시 시도해주세요.")
         else:
+            import html as _html
             for msg in reversed(wonyo_msgs):
                 sigs = msg.get("signals", [])
                 dt_str = msg["datetime"][:16].replace("T", " ") if msg["datetime"] else ""
 
-                # 신호 요약 HTML
-                sig_html = ""
-                for s in sigs:
-                    coin_str = s["coin"] or ""
-                    dir_str  = s["dir"]
-                    dir_color = "#5de8a0" if dir_str == "LONG" else "#e85d5d"
-                    dir_label = "📈 롱" if dir_str == "LONG" else "📉 숏"
-
-                    price_str = ""
-                    if s["price_from"] and s["price_to"]:
-                        price_str = f"${s['price_from']:,.0f} ~ ${s['price_to']:,.0f} 구간"
-                    elif s["extra_prices"]:
-                        price_str = " · ".join(f"${p:,.0f}" for p in s["extra_prices"][:3])
-
-                    switch_html = ""
-                    if s["switch"]:
-                        sw_color = "#5de8a0" if s["switch"] == "LONG" else "#e85d5d"
-                        sw_label = "📈 롱" if s["switch"] == "LONG" else "📉 숏"
-                        switch_html = f'<span style="color:#888"> → 이후 </span><span style="color:{sw_color};font-weight:700">{sw_label} 스위칭</span>'
-
-                    sig_html += f"""
-                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap;">
-                      <span style="background:{'#1a4a2e' if dir_str=='LONG' else '#4a1a1a'};color:{dir_color};
-                                   border-radius:4px;padding:3px 10px;font-size:12px;font-weight:700;">{dir_label}</span>
-                      {f'<span style="color:#aaa;font-size:12px;">{coin_str}</span>' if coin_str else ''}
-                      {f'<span style="color:#fff;font-size:13px;font-weight:600;">{price_str}</span>' if price_str else ''}
-                      {switch_html}
-                    </div>"""
-
-                # 원문 (접을 수 있게)
+                # 신호 요약 — 순수 st 컴포넌트로 렌더 (HTML injection 방지)
                 border_color = "rgba(255,255,255,0.08)"
                 if sigs:
                     border_color = "#5de8a044" if sigs[0]["dir"] == "LONG" else "#e85d5d44"
 
-                st.markdown(f"""
-                <div style="background:rgba(255,255,255,0.03);border-radius:10px;
-                            padding:14px 16px;margin-bottom:10px;border:1px solid {border_color};">
-                  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:{'8px' if sig_html else '0'};">
-                    <div style="flex:1">{sig_html if sig_html else '<span style="color:#666;font-size:12px;">방향 신호 없음</span>'}</div>
-                    <div style="font-size:10px;color:#444;white-space:nowrap;margin-left:8px;">{dt_str}</div>
-                  </div>
-                  <div style="font-size:12px;color:#666;white-space:pre-wrap;line-height:1.6;border-top:{'1px solid rgba(255,255,255,0.05);padding-top:8px;margin-top:4px' if sig_html else 'none'};">{msg['text']}</div>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(f'<div style="border:1px solid {border_color};border-radius:10px;'
+                            f'padding:14px 16px;margin-bottom:10px;background:rgba(255,255,255,0.03);">',
+                            unsafe_allow_html=True)
+
+                # 날짜
+                if dt_str:
+                    st.caption(dt_str)
+
+                # 신호 배지
+                for s in sigs:
+                    dir_str   = s["dir"]
+                    dir_color = "#5de8a0" if dir_str == "LONG" else "#e85d5d"
+                    dir_bg    = "#1a4a2e"  if dir_str == "LONG" else "#4a1a1a"
+                    dir_label = "📈 롱"    if dir_str == "LONG" else "📉 숏"
+                    coin_str  = s["coin"] or ""
+
+                    price_str = ""
+                    if s["price_from"] and s["price_to"]:
+                        price_str = f"  ${s['price_from']:,.0f} ~ ${s['price_to']:,.0f}"
+                    elif s["extra_prices"]:
+                        price_str = "  " + " · ".join(f"${p:,.0f}" for p in s["extra_prices"][:3])
+
+                    switch_str = ""
+                    if s["switch"]:
+                        sw_label = "📈 롱" if s["switch"] == "LONG" else "📉 숏"
+                        sw_color = "#5de8a0" if s["switch"] == "LONG" else "#e85d5d"
+                        switch_str = (f'&nbsp;&nbsp;<span style="color:#888">→ 이후</span>&nbsp;'
+                                      f'<span style="color:{sw_color};font-weight:700">{sw_label} 스위칭</span>')
+
+                    st.markdown(
+                        f'<div style="margin-bottom:6px;">'
+                        f'<span style="background:{dir_bg};color:{dir_color};border-radius:4px;'
+                        f'padding:3px 10px;font-size:12px;font-weight:700;">{dir_label}</span>'
+                        f'&nbsp;<span style="color:#aaa;font-size:12px;">{coin_str}</span>'
+                        f'<span style="color:#fff;font-size:13px;font-weight:600;">{price_str}</span>'
+                        f'{switch_str}</div>',
+                        unsafe_allow_html=True
+                    )
+
+                if not sigs:
+                    st.caption("방향 신호 없음")
+
+                # 원문 — HTML escape 후 출력
+                safe_text = _html.escape(msg["text"]).replace("\n", "<br>")
+                st.markdown(
+                    f'<div style="font-size:12px;color:#888;margin-top:8px;line-height:1.7;">{safe_text}</div>',
+                    unsafe_allow_html=True
+                )
+
+                st.markdown("</div>", unsafe_allow_html=True)
 
 with tab_trade:
     # Macro warning
