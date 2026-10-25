@@ -124,6 +124,51 @@ def fetch_macro_events():
         return events
     except: return []
 
+@st.cache_data(ttl=300)
+def fetch_wonyo_messages(limit=5):
+    """워뇨띠 공개 텔레그램 채널 최신 글 스크래핑"""
+    import re
+    try:
+        r = requests.get("https://t.me/s/AOA_openTele", timeout=10,
+                         headers={"User-Agent": "Mozilla/5.0"})
+        html = r.text
+
+        # 메시지 텍스트 추출
+        texts = re.findall(
+            r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>',
+            html, re.DOTALL
+        )
+        msgs = []
+        for raw in texts[-limit:]:
+            # HTML 태그 제거
+            clean = re.sub(r"<[^>]+>", "", raw).strip()
+            clean = clean.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&#39;", "'").replace("&quot;", '"')
+            if clean:
+                msgs.append(clean)
+
+        # 날짜 추출
+        dates = re.findall(r'datetime="([^"]+)"', html)
+
+        result = []
+        for i, msg in enumerate(msgs):
+            dt_str = dates[-(len(msgs)-i)] if len(dates) >= len(msgs)-i else ""
+            # 방향 파싱
+            direction = None
+            if re.search(r'롱|long|매수|상승|bull', msg, re.I): direction = "LONG"
+            if re.search(r'숏|short|매도|하락|bear', msg, re.I): direction = "SHORT"
+            # 가격 파싱
+            prices = [float(p.replace(",", "")) for p in re.findall(r'[\$]?\s*([\d,]{4,})', msg)]
+            result.append({
+                "text": msg[:300],
+                "direction": direction,
+                "prices": prices[:4],
+                "datetime": dt_str,
+            })
+        return result
+    except Exception as e:
+        return []
+
+
 @st.cache_data(ttl=60)
 def fetch_open_interest(usdt_symbol="BTCUSDT"):
     try:
@@ -2311,22 +2356,16 @@ def render_swing_analysis(symbol, display, funding_rate):
         df_weekly = fetch_ohlcv(symbol, "1w",  limit=100)
         df_daily  = fetch_ohlcv(symbol, "1d",  limit=360)
         df_4h     = fetch_ohlcv(symbol, "4h",  limit=200)
-        df_15m    = fetch_ohlcv(symbol, "15m", limit=100)
 
     # OKX는 "3d" 미지원 → 일봉 데이터를 3일 단위로 리샘플링
     df_3d = None
     if df_daily is not None and len(df_daily) >= 30:
         try:
-            _d = df_daily.copy()
-            _d = _d.set_index("ts")
-            _d3 = _d.resample("3D").agg({
-                "open":   "first",
-                "high":   "max",
-                "low":    "min",
-                "close":  "last",
-                "volume": "sum",
+            _d = df_daily.copy().set_index("ts")
+            df_3d = _d.resample("3D").agg({
+                "open": "first", "high": "max",
+                "low": "min", "close": "last", "volume": "sum",
             }).dropna().reset_index()
-            df_3d = _d3
         except Exception:
             df_3d = None
 
@@ -2344,6 +2383,9 @@ def render_swing_analysis(symbol, display, funding_rate):
     gaps   = detect_weekly_gaps(df_weekly, price)
     levels = get_weekly_key_levels(df_weekly, df_daily, price)
 
+    # ── 현재가
+    st.metric(f"{display} 현재가", f"${price:,.2f}", f"{change:+.2f}%")
+
     # ── 방향 카드
     is_bull   = swing["direction"] == "bull"
     is_bear   = swing["direction"] == "bear"
@@ -2351,102 +2393,84 @@ def render_swing_analysis(symbol, display, funding_rate):
     dir_emoji = "📈" if is_bull else ("📉" if is_bear else "↔")
     dir_kr    = "롱 우세" if is_bull else ("숏 우세" if is_bear else "방향 불명확")
 
+    # 사이클 한국어 설명
+    cycle_help = {
+        1: "지금 고점 근처입니다. 신규 롱은 위험해요.",
+        2: "고점에서 처음 내려오는 구간. 숏 유리.",
+        3: "한번 떨어졌다가 반등 시도 중. 눌림 가능성 있음.",
+        4: "오랜 하락 중. 저점을 계속 낮추는 구간.",
+        5: "많이 떨어진 곳에서 강하게 반등. 롱 타이밍.",
+        6: "반등 후 다시 조정. 추세 전환 전 관망 구간.",
+        7: "본격 상승장. 롱 포지션 유리.",
+    }.get(cycle.get("stage", 0), "")
+
+    # BB 설명
+    if bb_sq["squeeze"]:
+        bb_desc = "주봉 BB가 좁아지고 있어요. 곧 큰 방향으로 움직일 수 있습니다."
+    else:
+        bb_desc = "주봉 BB가 정상 상태입니다."
+
     st.markdown(f"""
-    <div style="background:rgba(255,255,255,0.04);border-radius:12px;padding:16px 20px;
-                border-left:4px solid {dir_color};margin-bottom:12px;">
-      <div style="font-size:11px;color:#888;letter-spacing:2px;margin-bottom:4px;">SWING DIRECTION</div>
-      <div style="font-size:28px;font-weight:800;color:{dir_color};">{dir_emoji} {dir_kr}</div>
-      <div style="font-size:13px;color:#ccc;margin-top:4px;">신호 점수 {swing['score']:+.0f} — {swing['confidence']}</div>
-      <div style="font-size:11px;color:#888;margin-top:6px;">{cycle['desc']}</div>
+    <div style="background:rgba(255,255,255,0.04);border-radius:12px;padding:18px 20px;
+                border-left:4px solid {dir_color};margin:12px 0;">
+      <div style="font-size:11px;color:#888;letter-spacing:2px;margin-bottom:6px;">스윙 방향 분석</div>
+      <div style="font-size:30px;font-weight:800;color:{dir_color};">{dir_emoji} {dir_kr}</div>
+      <div style="font-size:12px;color:#aaa;margin-top:8px;">
+        {'지금 기준으로 ' + ('롱(매수) 포지션이 유리한 구간' if is_bull else ('숏(매도) 포지션이 유리한 구간' if is_bear else '뚜렷한 방향이 없어 관망을 권장합니다'))}
+      </div>
+      <div style="font-size:11px;color:#666;margin-top:4px;">신호 강도: {swing['score']:+.0f}점 ({swing['confidence']})</div>
     </div>
     """, unsafe_allow_html=True)
 
-    # ── 메트릭 행
-    c1, c2, c3 = st.columns(3)
-    c1.metric(display, f"${price:,.2f}", f"{change:+.2f}%")
-    c2.metric("시장 사이클", cycle["label"])
-    c3.metric("BB 상태", "⚡ 수축" if bb_sq["squeeze"] else "정상", bb_sq["label"][:15])
+    # ── 시장 사이클 & BB 상태 설명
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(f"""
+        <div style="background:rgba(255,255,255,0.03);border-radius:10px;padding:14px 16px;">
+          <div style="font-size:10px;color:#888;margin-bottom:4px;">시장 사이클 — {cycle['label']}</div>
+          <div style="font-size:12px;color:#ccc;">{cycle_help}</div>
+        </div>
+        """, unsafe_allow_html=True)
+    with c2:
+        bb_color = "#f0c040" if bb_sq["squeeze"] else "#888"
+        st.markdown(f"""
+        <div style="background:rgba(255,255,255,0.03);border-radius:10px;padding:14px 16px;">
+          <div style="font-size:10px;color:#888;margin-bottom:4px;">볼린저밴드 상태</div>
+          <div style="font-size:12px;color:{bb_color};">{'⚡ ' if bb_sq['squeeze'] else ''}{bb_desc}</div>
+        </div>
+        """, unsafe_allow_html=True)
 
     # ── 점수 상세 (확장)
-    with st.expander("📊 점수 상세 보기", expanded=False):
+    with st.expander("분석 근거 자세히 보기", expanded=False):
+        st.caption("각 지표가 방향에 얼마나 기여했는지 보여줍니다. (+)는 롱 방향, (-)는 숏 방향 근거입니다.")
         for name, val in swing["details"]:
             color = "#5de8a0" if val > 0 else "#e85d5d"
             st.markdown(f"<span style='color:{color}'>{'+' if val>0 else ''}{val} &nbsp; {name}</span>", unsafe_allow_html=True)
 
-    # ── 핵심 레벨 테이블
-    st.markdown("#### 🗺️ 핵심 레벨")
+    st.divider()
+
+    # ── 핵심 레벨 (진입/목표/손절 참고 구간)
+    st.markdown("**진입·목표·손절 참고 레벨**")
+    st.caption("현재가 위는 저항(숏 목표 or 롱 손절), 아래는 지지(롱 목표 or 숏 손절)로 활용하세요.")
     if levels:
         rows = []
         for lv in sorted(levels, key=lambda x: x["price"], reverse=True)[:8]:
             dist = (lv["price"] - price) / price * 100
-            t_color = "🔴" if lv["type"] == "저항" else ("🟢" if lv["type"] == "지지" else "⚪")
+            arrow = "🔴 위" if dist > 0 else "🟢 아래"
             rows.append({
-                "레벨": f"${lv['price']:,.0f}",
-                "구분": f"{t_color} {lv['type']}",
-                "TF": lv["tf"],
-                "현재가 대비": f"{dist:+.1f}%",
+                "가격": f"${lv['price']:,.0f}",
+                "위치": f"{arrow} ({dist:+.1f}%)",
+                "근거": f"{lv['tf']} {lv['type']}",
             })
         st.dataframe(rows, use_container_width=True, hide_index=True)
 
-    # ── 주봉 빈공간
+    # ── 주봉 빈공간 (가격이 채우러 가는 구간)
     if gaps:
-        st.markdown("#### 📭 주봉 빈공간 (타겟 구간)")
+        st.markdown("**주봉 빈공간** — 가격이 끌려가기 쉬운 타겟 구간")
         for g in gaps[:3]:
-            direction_icon = "⬇️" if g["center"] < price else "⬆️"
+            direction_icon = "⬇️ 아래" if g["center"] < price else "⬆️ 위"
             dist = (g["center"] - price) / price * 100
-            st.info(f"{direction_icon} **{g['label']}** — 현재가 대비 {dist:+.1f}%")
-
-    # ── 주봉 차트
-    with st.expander("📈 주봉 차트", expanded=True):
-        fig = go.Figure()
-
-        # 캔들
-        dw = df_weekly.tail(52)
-        fig.add_trace(go.Candlestick(
-            x=dw["ts"], open=dw["open"], high=dw["high"], low=dw["low"], close=dw["close"],
-            name="주봉", increasing_line_color="#5de8a0", decreasing_line_color="#e85d5d",
-            increasing_fillcolor="#5de8a0", decreasing_fillcolor="#e85d5d", line_width=1,
-        ))
-
-        # BB
-        if len(df_weekly) >= 20:
-            bb = ta.volatility.BollingerBands(df_weekly["close"], window=20)
-            fig.add_trace(go.Scatter(x=dw["ts"], y=bb.bollinger_hband().loc[dw.index],
-                name="BB상단", line=dict(color="rgba(120,120,200,0.5)", width=1), showlegend=False))
-            fig.add_trace(go.Scatter(x=dw["ts"], y=bb.bollinger_lband().loc[dw.index],
-                name="BB하단", line=dict(color="rgba(120,120,200,0.5)", width=1),
-                fill="tonexty", fillcolor="rgba(120,120,200,0.05)", showlegend=False))
-            fig.add_trace(go.Scatter(x=dw["ts"], y=bb.bollinger_mavg().loc[dw.index],
-                name="BB중단", line=dict(color="rgba(120,120,200,0.3)", width=1, dash="dot"), showlegend=False))
-
-        # 핵심 레벨 수평선
-        for lv in levels[:6]:
-            c = "rgba(232,93,93,0.6)" if lv["type"] == "저항" else ("rgba(93,232,160,0.6)" if lv["type"] == "지지" else "rgba(200,200,200,0.3)")
-            fig.add_hline(y=lv["price"], line_color=c, line_dash="dash", line_width=1,
-                          annotation_text=f"  {lv['tf']} {lv['type']} ${lv['price']:,.0f}",
-                          annotation_font_size=9, annotation_font_color=c)
-
-        # 주봉 빈공간 음영
-        for g in gaps[:2]:
-            shade = "rgba(255,200,0,0.07)"
-            fig.add_hrect(y0=g["low"], y1=g["high"], fillcolor=shade, line_width=0,
-                          annotation_text=f"빈공간", annotation_font_size=8,
-                          annotation_font_color="rgba(255,200,0,0.6)")
-
-        # 현재가
-        fig.add_hline(y=price, line_color="rgba(255,255,255,0.6)", line_width=1,
-                      annotation_text=f"  현재 ${price:,.0f}", annotation_font_size=10)
-
-        pad = (dw["high"].max() - dw["low"].min()) * 0.05
-        fig.update_layout(
-            template="plotly_dark", height=480,
-            paper_bgcolor="#0e1117", plot_bgcolor="#0e1117",
-            xaxis_rangeslider_visible=False,
-            margin=dict(l=4, r=120, t=20, b=4),
-            title=dict(text=f"  {display} 주봉 차트 (52주)", font=dict(size=13), x=0),
-        )
-        fig.update_yaxes(range=[dw["low"].min() - pad, dw["high"].max() + pad])
-        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+            st.info(f"{direction_icon} {g['label']} — 현재가 대비 {dist:+.1f}%")
 
 
 # ══════════════════════════════════════════════
@@ -2638,11 +2662,42 @@ eth_fr = fetch_funding("ETH/USDT:USDT")
 tab_swing, tab_trade, tab_market = st.tabs(["📊 스윙 분석", "⚡ 단타 분석", "📊 시장 개요"])
 
 with tab_swing:
-    sw1, sw2 = st.tabs(["₿ BTC", "Ξ ETH"])
+    sw1, sw2, sw3 = st.tabs(["₿ BTC", "Ξ ETH", "📣 워뇨띠 채널"])
     with sw1:
         render_swing_analysis("BTC/USDT:USDT", "BTC", btc_fr)
     with sw2:
         render_swing_analysis("ETH/USDT:USDT", "ETH", eth_fr)
+    with sw3:
+        st.markdown("### 📣 워뇨띠 공개채널 최신 글")
+        st.caption("AOA_openTele 채널 · 5분 캐시")
+        wonyo_msgs = fetch_wonyo_messages(limit=6)
+        if not wonyo_msgs:
+            st.warning("채널 글을 불러오지 못했습니다. 잠시 후 다시 시도해주세요.")
+        else:
+            for msg in reversed(wonyo_msgs):
+                dir_badge = ""
+                if msg["direction"] == "LONG":
+                    dir_badge = '<span style="background:#1a4a2e;color:#5de8a0;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700">📈 롱</span>'
+                elif msg["direction"] == "SHORT":
+                    dir_badge = '<span style="background:#4a1a1a;color:#e85d5d;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700">📉 숏</span>'
+
+                price_tags = ""
+                if msg["prices"]:
+                    price_tags = " · ".join(f"<code>${p:,.0f}</code>" for p in msg["prices"][:3])
+
+                dt_str = msg["datetime"][:16].replace("T", " ") if msg["datetime"] else ""
+
+                st.markdown(f"""
+                <div style="background:rgba(255,255,255,0.03);border-radius:10px;
+                            padding:14px 16px;margin-bottom:10px;border:1px solid rgba(255,255,255,0.07);">
+                  <div style="display:flex;justify-content:space-between;margin-bottom:8px;align-items:center;">
+                    <div>{dir_badge}</div>
+                    <div style="font-size:10px;color:#555;">{dt_str}</div>
+                  </div>
+                  <div style="font-size:13px;color:#ccc;white-space:pre-wrap;line-height:1.6;">{msg['text']}</div>
+                  {'<div style="margin-top:8px;font-size:11px;color:#888;">언급 가격: ' + price_tags + '</div>' if price_tags else ''}
+                </div>
+                """, unsafe_allow_html=True)
 
 with tab_trade:
     # Macro warning
