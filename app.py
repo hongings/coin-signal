@@ -2350,6 +2350,118 @@ def render_analysis_scalp(symbol, display, funding_rate, btc_direction=None):
 # 스윙 분석 렌더러
 # ══════════════════════════════════════════════
 
+def generate_swing_plan(direction, price, levels, gaps):
+    """
+    스윙 매매 계획 생성:
+    - entry: 진입 타점 (가격 범위)
+    - tp1, tp2: 1차·2차 목표
+    - sl: 손절 기준
+    - message: 핵심 메시지
+    """
+    if not levels:
+        return None
+
+    # 현재가 위/아래 레벨 분리 (0.2% 이내는 현재가로 취급)
+    above = sorted([l for l in levels if l["price"] > price * 1.002], key=lambda x: x["price"])
+    below = sorted([l for l in levels if l["price"] < price * 0.998], key=lambda x: x["price"], reverse=True)
+
+    # 갭 레벨도 합산
+    gap_above = sorted([g for g in gaps if g["center"] > price], key=lambda x: x["center"])
+    gap_below = sorted([g for g in gaps if g["center"] < price], key=lambda x: x["center"], reverse=True)
+
+    plan = {"direction": direction, "price": price}
+
+    if direction == "bull":
+        # 롱: 아래 지지에서 진입 → 위 저항이 목표
+        entry_lv  = below[0] if below else None
+        tp1_lv    = above[0] if above else None
+        tp2_lv    = above[1] if len(above) > 1 else None
+        sl_lv     = below[1] if len(below) > 1 else None
+
+        # 갭이 위에 있으면 목표로 우선
+        if gap_above and (tp1_lv is None or gap_above[0]["center"] < tp1_lv["price"] * 1.05):
+            if tp2_lv is None:
+                tp2_lv = {"price": gap_above[0]["center"], "tf": "주봉", "type": "빈공간"}
+            else:
+                tp1_lv = tp1_lv or {"price": gap_above[0]["center"], "tf": "주봉", "type": "빈공간"}
+
+        # 현재가가 이미 지지 근처면 즉시 진입 가능
+        at_support = entry_lv and abs(price - entry_lv["price"]) / price < 0.015
+        if at_support:
+            plan["entry_low"]  = entry_lv["price"] * 0.997
+            plan["entry_high"] = entry_lv["price"] * 1.003
+            plan["entry_msg"]  = f"현재가 지지 구간 근접 — 즉시 진입 가능"
+        elif entry_lv:
+            plan["entry_low"]  = entry_lv["price"] * 0.997
+            plan["entry_high"] = entry_lv["price"] * 1.005
+            plan["entry_msg"]  = f"${entry_lv['price']:,.0f} 지지 도달 시 진입 ({(entry_lv['price']-price)/price*100:+.1f}%)"
+        else:
+            plan["entry_low"]  = price * 0.995
+            plan["entry_high"] = price * 1.002
+            plan["entry_msg"]  = "현재가 근처 진입 가능 (명확한 지지 없음)"
+
+        plan["tp1"]  = tp1_lv["price"] if tp1_lv else None
+        plan["tp2"]  = tp2_lv["price"] if tp2_lv else None
+        plan["sl"]   = (sl_lv["price"] * 0.995) if sl_lv else (below[0]["price"] * 0.993 if below else price * 0.96)
+        plan["tp1_src"] = f"{tp1_lv['tf']} {tp1_lv['type']}" if tp1_lv else ""
+        plan["tp2_src"] = f"{tp2_lv['tf']} {tp2_lv['type']}" if tp2_lv else ""
+
+        # 핵심 메시지
+        msgs = []
+        if entry_lv and not at_support:
+            msgs.append(f"${entry_lv['price']:,.0f}까지 조정 후 반전 예상")
+        if tp1_lv:
+            msgs.append(f"1차 목표 ${tp1_lv['price']:,.0f} 저항 돌파 시 추가 상승")
+        if gap_above:
+            msgs.append(f"주봉 빈공간 ${gap_above[0]['center']:,.0f} 구간이 주요 타겟")
+        plan["message"] = " · ".join(msgs) if msgs else "지지 구간에서 롱 진입 유효"
+
+    elif direction == "bear":
+        # 숏: 위 저항에서 진입 → 아래 지지가 목표
+        entry_lv  = above[0] if above else None
+        tp1_lv    = below[0] if below else None
+        tp2_lv    = below[1] if len(below) > 1 else None
+        sl_lv     = above[1] if len(above) > 1 else None
+
+        if gap_below and (tp1_lv is None or gap_below[0]["center"] > tp1_lv["price"] * 0.95):
+            if tp2_lv is None:
+                tp2_lv = {"price": gap_below[0]["center"], "tf": "주봉", "type": "빈공간"}
+
+        at_resist = entry_lv and abs(price - entry_lv["price"]) / price < 0.015
+        if at_resist:
+            plan["entry_low"]  = entry_lv["price"] * 0.997
+            plan["entry_high"] = entry_lv["price"] * 1.003
+            plan["entry_msg"]  = f"현재가 저항 구간 근접 — 즉시 진입 가능"
+        elif entry_lv:
+            plan["entry_low"]  = entry_lv["price"] * 0.995
+            plan["entry_high"] = entry_lv["price"] * 1.003
+            plan["entry_msg"]  = f"${entry_lv['price']:,.0f} 저항 도달 시 진입 ({(entry_lv['price']-price)/price*100:+.1f}%)"
+        else:
+            plan["entry_low"]  = price * 0.998
+            plan["entry_high"] = price * 1.005
+            plan["entry_msg"]  = "현재가 근처 진입 가능 (명확한 저항 없음)"
+
+        plan["tp1"]  = tp1_lv["price"] if tp1_lv else None
+        plan["tp2"]  = tp2_lv["price"] if tp2_lv else None
+        plan["sl"]   = (sl_lv["price"] * 1.005) if sl_lv else (above[0]["price"] * 1.007 if above else price * 1.04)
+        plan["tp1_src"] = f"{tp1_lv['tf']} {tp1_lv['type']}" if tp1_lv else ""
+        plan["tp2_src"] = f"{tp2_lv['tf']} {tp2_lv['type']}" if tp2_lv else ""
+
+        msgs = []
+        if entry_lv and not at_resist:
+            msgs.append(f"${entry_lv['price']:,.0f}까지 반등 후 재하락 예상")
+        if tp1_lv:
+            msgs.append(f"1차 목표 ${tp1_lv['price']:,.0f} 지지 이탈 시 추가 하락")
+        if gap_below:
+            msgs.append(f"주봉 빈공간 ${gap_below[0]['center']:,.0f} 구간이 주요 타겟")
+        plan["message"] = " · ".join(msgs) if msgs else "저항 구간에서 숏 진입 유효"
+
+    else:
+        return None
+
+    return plan
+
+
 def render_swing_analysis(symbol, display, funding_rate):
     """스윙 분석 탭 — 주봉/일봉/3일봉 기반 워뇨띠 방식 분석"""
     with st.spinner(f"{display} 스윙 분석 중..."):
@@ -2383,94 +2495,107 @@ def render_swing_analysis(symbol, display, funding_rate):
     gaps   = detect_weekly_gaps(df_weekly, price)
     levels = get_weekly_key_levels(df_weekly, df_daily, price)
 
-    # ── 현재가
-    st.metric(f"{display} 현재가", f"${price:,.2f}", f"{change:+.2f}%")
-
-    # ── 방향 카드
+    # ── 분석
     is_bull   = swing["direction"] == "bull"
     is_bear   = swing["direction"] == "bear"
     dir_color = "#5de8a0" if is_bull else ("#e85d5d" if is_bear else "#aaaaaa")
     dir_emoji = "📈" if is_bull else ("📉" if is_bear else "↔")
-    dir_kr    = "롱 우세" if is_bull else ("숏 우세" if is_bear else "방향 불명확")
 
-    # 사이클 한국어 설명
+    plan = generate_swing_plan(swing["direction"], price, levels, gaps)
+
+    # ══ 메인 타점 카드 ══
+    if plan:
+        tp1_pct = (plan["tp1"] - price) / price * 100 if plan["tp1"] else 0
+        tp2_pct = (plan["tp2"] - price) / price * 100 if plan["tp2"] else 0
+        sl_pct  = (plan["sl"]  - price) / price * 100
+
+        tp1_str = f"${plan['tp1']:,.0f} ({tp1_pct:+.1f}%)" if plan["tp1"] else "—"
+        tp2_str = f"${plan['tp2']:,.0f} ({tp2_pct:+.1f}%)" if plan["tp2"] else "—"
+        sl_str  = f"${plan['sl']:,.0f} ({sl_pct:+.1f}%)"
+
+        entry_str = f"${plan['entry_low']:,.0f} ~ ${plan['entry_high']:,.0f}"
+
+        st.markdown(f"""
+        <div style="background:rgba(255,255,255,0.05);border-radius:14px;padding:20px 22px;
+                    border:1px solid {dir_color}44;margin-bottom:14px;">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">
+            <span style="font-size:26px;font-weight:900;color:{dir_color};">{dir_emoji} {display} {'롱' if is_bull else '숏'} 시나리오</span>
+            <span style="font-size:11px;color:#666;">{swing['confidence']}</span>
+          </div>
+          <div style="font-size:13px;color:#e0e0e0;margin-bottom:16px;line-height:1.7;">
+            {plan['message']}
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+            <div style="background:rgba(255,255,255,0.04);border-radius:8px;padding:12px;">
+              <div style="font-size:10px;color:#888;margin-bottom:4px;">⬛ 진입 타점</div>
+              <div style="font-size:15px;font-weight:700;color:#fff;">{entry_str}</div>
+              <div style="font-size:10px;color:#666;margin-top:2px;">{plan['entry_msg']}</div>
+            </div>
+            <div style="background:rgba(232,93,93,0.1);border-radius:8px;padding:12px;">
+              <div style="font-size:10px;color:#888;margin-bottom:4px;">🛑 손절 기준</div>
+              <div style="font-size:15px;font-weight:700;color:#e85d5d;">{sl_str}</div>
+              <div style="font-size:10px;color:#666;margin-top:2px;">이 가격 {'이탈' if is_bull else '돌파'} 시 포지션 종료</div>
+            </div>
+            <div style="background:rgba(93,232,160,0.08);border-radius:8px;padding:12px;">
+              <div style="font-size:10px;color:#888;margin-bottom:4px;">🎯 1차 목표</div>
+              <div style="font-size:15px;font-weight:700;color:#5de8a0;">{tp1_str}</div>
+              <div style="font-size:10px;color:#666;margin-top:2px;">{plan['tp1_src']}</div>
+            </div>
+            <div style="background:rgba(93,160,232,0.08);border-radius:8px;padding:12px;">
+              <div style="font-size:10px;color:#888;margin-bottom:4px;">🎯 2차 목표</div>
+              <div style="font-size:15px;font-weight:700;color:#5da8e8;">{tp2_str}</div>
+              <div style="font-size:10px;color:#666;margin-top:2px;">{plan['tp2_src']}</div>
+            </div>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    elif swing["direction"] == "neutral":
+        st.markdown(f"""
+        <div style="background:rgba(255,255,255,0.03);border-radius:14px;padding:20px 22px;
+                    border:1px solid #444;margin-bottom:14px;">
+          <div style="font-size:22px;font-weight:800;color:#aaa;">↔ 방향 불명확 — 관망</div>
+          <div style="font-size:13px;color:#777;margin-top:8px;">
+            상승·하락 신호가 혼재합니다. 명확한 방향이 잡힐 때까지 진입하지 마세요.
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # ── 사이클 + BB 보조 정보
     cycle_help = {
-        1: "지금 고점 근처입니다. 신규 롱은 위험해요.",
-        2: "고점에서 처음 내려오는 구간. 숏 유리.",
-        3: "한번 떨어졌다가 반등 시도 중. 눌림 가능성 있음.",
-        4: "오랜 하락 중. 저점을 계속 낮추는 구간.",
-        5: "많이 떨어진 곳에서 강하게 반등. 롱 타이밍.",
-        6: "반등 후 다시 조정. 추세 전환 전 관망 구간.",
-        7: "본격 상승장. 롱 포지션 유리.",
+        1: "고점 근처. 신규 롱 위험.",
+        2: "고점에서 첫 하락 중. 숏 유리.",
+        3: "반등 시도 중. 눌림 가능성.",
+        4: "오랜 하락. 저점 낮추는 구간.",
+        5: "크게 떨어진 후 강한 반등. 롱 타이밍.",
+        6: "반등 후 재조정. 추세 전환 전 관망.",
+        7: "본격 상승장. 롱 유리.",
     }.get(cycle.get("stage", 0), "")
+    bb_desc = "⚡ BB 수축 — 곧 큰 방향 나올 수 있음" if bb_sq["squeeze"] else "BB 정상"
 
-    # BB 설명
-    if bb_sq["squeeze"]:
-        bb_desc = "주봉 BB가 좁아지고 있어요. 곧 큰 방향으로 움직일 수 있습니다."
-    else:
-        bb_desc = "주봉 BB가 정상 상태입니다."
+    st.caption(f"시장 사이클: {cycle['label']} — {cycle_help}  ·  {bb_desc}  ·  신호 {swing['score']:+.0f}점")
 
-    st.markdown(f"""
-    <div style="background:rgba(255,255,255,0.04);border-radius:12px;padding:18px 20px;
-                border-left:4px solid {dir_color};margin:12px 0;">
-      <div style="font-size:11px;color:#888;letter-spacing:2px;margin-bottom:6px;">스윙 방향 분석</div>
-      <div style="font-size:30px;font-weight:800;color:{dir_color};">{dir_emoji} {dir_kr}</div>
-      <div style="font-size:12px;color:#aaa;margin-top:8px;">
-        {'지금 기준으로 ' + ('롱(매수) 포지션이 유리한 구간' if is_bull else ('숏(매도) 포지션이 유리한 구간' if is_bear else '뚜렷한 방향이 없어 관망을 권장합니다'))}
-      </div>
-      <div style="font-size:11px;color:#666;margin-top:4px;">신호 강도: {swing['score']:+.0f}점 ({swing['confidence']})</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-    # ── 시장 사이클 & BB 상태 설명
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown(f"""
-        <div style="background:rgba(255,255,255,0.03);border-radius:10px;padding:14px 16px;">
-          <div style="font-size:10px;color:#888;margin-bottom:4px;">시장 사이클 — {cycle['label']}</div>
-          <div style="font-size:12px;color:#ccc;">{cycle_help}</div>
-        </div>
-        """, unsafe_allow_html=True)
-    with c2:
-        bb_color = "#f0c040" if bb_sq["squeeze"] else "#888"
-        st.markdown(f"""
-        <div style="background:rgba(255,255,255,0.03);border-radius:10px;padding:14px 16px;">
-          <div style="font-size:10px;color:#888;margin-bottom:4px;">볼린저밴드 상태</div>
-          <div style="font-size:12px;color:{bb_color};">{'⚡ ' if bb_sq['squeeze'] else ''}{bb_desc}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
-    # ── 점수 상세 (확장)
+    # ── 점수 상세
     with st.expander("분석 근거 자세히 보기", expanded=False):
-        st.caption("각 지표가 방향에 얼마나 기여했는지 보여줍니다. (+)는 롱 방향, (-)는 숏 방향 근거입니다.")
+        st.caption("(+)는 롱 방향, (-)는 숏 방향 근거")
         for name, val in swing["details"]:
             color = "#5de8a0" if val > 0 else "#e85d5d"
             st.markdown(f"<span style='color:{color}'>{'+' if val>0 else ''}{val} &nbsp; {name}</span>", unsafe_allow_html=True)
 
     st.divider()
 
-    # ── 핵심 레벨 (진입/목표/손절 참고 구간)
-    st.markdown("**진입·목표·손절 참고 레벨**")
-    st.caption("현재가 위는 저항(숏 목표 or 롱 손절), 아래는 지지(롱 목표 or 숏 손절)로 활용하세요.")
+    # ── 전체 레벨 맵 (참고용)
     if levels:
+        st.markdown("**전체 레벨 맵**")
         rows = []
         for lv in sorted(levels, key=lambda x: x["price"], reverse=True)[:8]:
             dist = (lv["price"] - price) / price * 100
-            arrow = "🔴 위" if dist > 0 else "🟢 아래"
             rows.append({
                 "가격": f"${lv['price']:,.0f}",
-                "위치": f"{arrow} ({dist:+.1f}%)",
-                "근거": f"{lv['tf']} {lv['type']}",
+                "위치": f"{'위' if dist > 0 else '아래'} {abs(dist):.1f}%",
+                "구분": f"{lv['tf']} {lv['type']}",
             })
         st.dataframe(rows, use_container_width=True, hide_index=True)
-
-    # ── 주봉 빈공간 (가격이 채우러 가는 구간)
-    if gaps:
-        st.markdown("**주봉 빈공간** — 가격이 끌려가기 쉬운 타겟 구간")
-        for g in gaps[:3]:
-            direction_icon = "⬇️ 아래" if g["center"] < price else "⬆️ 위"
-            dist = (g["center"] - price) / price * 100
-            st.info(f"{direction_icon} {g['label']} — 현재가 대비 {dist:+.1f}%")
 
 
 # ══════════════════════════════════════════════
