@@ -2626,7 +2626,7 @@ def render_swing_analysis(symbol, display, funding_rate):
     plan = generate_swing_plan(swing["direction"], price, levels, gaps)
 
     # ══ 메인 타점 카드 ══
-    if plan:
+    if plan and plan.get("direction") != "neutral":
         tp1_pct = (plan["tp1"] - price) / price * 100 if plan["tp1"] else 0
         tp2_pct = (plan["tp2"] - price) / price * 100 if plan["tp2"] else 0
         sl_pct  = (plan["sl"]  - price) / price * 100
