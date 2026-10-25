@@ -2700,19 +2700,55 @@ def render_swing_analysis(symbol, display, funding_rate):
         </div>
         """, unsafe_allow_html=True)
 
-    # ── 사이클 + BB 보조 정보
-    cycle_help = {
-        1: "고점 근처. 신규 롱 위험.",
-        2: "고점에서 첫 하락 중. 숏 유리.",
-        3: "반등 시도 중. 눌림 가능성.",
-        4: "오랜 하락. 저점 낮추는 구간.",
-        5: "크게 떨어진 후 강한 반등. 롱 타이밍.",
-        6: "반등 후 재조정. 추세 전환 전 관망.",
-        7: "본격 상승장. 롱 유리.",
-    }.get(cycle.get("stage", 0), "")
+    # ── 사이클 전체 단계 시각화
     bb_desc = "⚡ BB 수축 — 곧 큰 방향 나올 수 있음" if bb_sq["squeeze"] else "BB 정상"
+    st.caption(f"{bb_desc}  ·  신호 {swing['score']:+.0f}점")
 
-    st.caption(f"시장 사이클: {cycle['label']} — {cycle_help}  ·  {bb_desc}  ·  신호 {swing['score']:+.0f}점")
+    STAGES = [
+        (1, "ATH 고점",        "최고점 부근. 신규 롱 위험",           "bear"),
+        (2, "1차 하락",        "고점에서 첫 하락. 숏 유리",            "bear"),
+        (3, "반등 시도",       "하락 후 반등. 눌림 가능성 있음",        "neutral"),
+        (4, "본격 하락",       "저점 낮추는 긴 하락. 매수 금지",        "bear"),
+        (5, "바닥 반등",       "바닥권 강한 반등. 롱 타이밍",           "bull"),
+        (6, "2차 조정",        "반등 후 재조정. 상승 전환 직전 관망",   "neutral"),
+        (7, "대상승장",        "본격 상승장. 롱 포지션 유리",           "bull"),
+    ]
+    current_stage = cycle.get("stage", 0)
+
+    stage_items = ""
+    for num, name, desc, bias in STAGES:
+        is_current = (num == current_stage)
+        if is_current:
+            bg      = "#1a3a5c" if bias == "bull" else ("#3a1a1a" if bias == "bear" else "#2a2a1a")
+            border  = "#5da8e8" if bias == "bull" else ("#e85d5d" if bias == "bear" else "#c8a82a")
+            num_col = "#5da8e8" if bias == "bull" else ("#e85d5d" if bias == "bear" else "#c8a82a")
+            txt_col = "#ffffff"
+            marker  = " ◀ 현재"
+        else:
+            bg      = "rgba(255,255,255,0.02)"
+            border  = "rgba(255,255,255,0.06)"
+            num_col = "#555"
+            txt_col = "#666"
+            marker  = ""
+
+        stage_items += (
+            f'<div style="display:flex;align-items:flex-start;gap:10px;'
+            f'background:{bg};border:1px solid {border};border-radius:8px;'
+            f'padding:8px 12px;margin-bottom:5px;">'
+            f'<span style="color:{num_col};font-weight:800;font-size:14px;min-width:18px;">{num}</span>'
+            f'<div>'
+            f'<span style="color:{txt_col};font-size:12px;font-weight:{"700" if is_current else "400"};">'
+            f'{name}{marker}</span>'
+            f'<span style="color:{"#aaa" if is_current else "#555"};font-size:11px;"> — {desc}</span>'
+            f'</div></div>'
+        )
+
+    st.markdown(
+        f'<div style="margin:12px 0 16px;">'
+        f'<div style="font-size:10px;color:#666;letter-spacing:1px;margin-bottom:8px;">시장 사이클</div>'
+        f'{stage_items}</div>',
+        unsafe_allow_html=True
+    )
 
     # ── 점수 상세
     with st.expander("분석 근거 자세히 보기", expanded=True):
