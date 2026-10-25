@@ -125,47 +125,104 @@ def fetch_macro_events():
     except: return []
 
 @st.cache_data(ttl=300)
-def fetch_wonyo_messages(limit=5):
-    """워뇨띠 공개 텔레그램 채널 최신 글 스크래핑"""
+def fetch_wonyo_messages(limit=6):
+    """워뇨띠 공개 텔레그램 채널 최신 글 스크래핑 + 타점 파싱"""
     import re
+
+    def _parse_price(s):
+        """'77k', '77,000', '77000', '77.5k' → float"""
+        s = s.replace(",", "").strip()
+        if re.search(r'[kK]$', s):
+            return float(re.sub(r'[kK]$', '', s)) * 1000
+        return float(s)
+
+    def _extract_signals(text):
+        """
+        텍스트에서 (코인, 방향, 가격범위, 스위칭) 추출
+        예) "77~78k까지 비트코인 숏, 이후 롱 스위칭"
+            → [{"coin":"BTC","dir":"SHORT","from":77000,"to":78000,"switch":"LONG"}]
+        """
+        signals = []
+        # 코인 감지
+        coin = None
+        if re.search(r'비트|btc|bitcoin', text, re.I): coin = "BTC"
+        elif re.search(r'이더|eth|ethereum', text, re.I): coin = "ETH"
+
+        # 가격 범위 패턴: 77~78k / 77,000~78,000 / 77k~78k
+        range_pat = re.findall(
+            r'([\d,.]+[kK]?)\s*[~\-~–—]\s*([\d,.]+[kK]?)',
+            text
+        )
+        price_ranges = []
+        for a, b in range_pat:
+            try:
+                lo, hi = sorted([_parse_price(a), _parse_price(b)])
+                if 1000 < lo < 10_000_000:  # 합리적인 코인 가격 범위
+                    price_ranges.append((lo, hi))
+            except: pass
+
+        # 단일 가격
+        single_prices = []
+        for p in re.findall(r'[\$]?([\d,]+[kK]?)', text):
+            try:
+                v = _parse_price(p)
+                if 1000 < v < 10_000_000:
+                    single_prices.append(v)
+            except: pass
+
+        # 1차 방향
+        dir1 = None
+        if re.search(r'숏|공매도|short', text, re.I): dir1 = "SHORT"
+        elif re.search(r'롱|매수|long', text, re.I): dir1 = "LONG"
+
+        # 스위칭 방향
+        switch = None
+        if re.search(r'이후\s*(롱|long)|스위칭\s*(롱|long)|전환\s*(롱|long)', text, re.I): switch = "LONG"
+        elif re.search(r'이후\s*(숏|short)|스위칭\s*(숏|short)|전환\s*(숏|short)', text, re.I): switch = "SHORT"
+
+        if dir1:
+            entry = price_ranges[0] if price_ranges else (None, None)
+            signals.append({
+                "coin": coin,
+                "dir": dir1,
+                "price_from": entry[0],
+                "price_to":   entry[1],
+                "extra_prices": single_prices[:4],
+                "switch": switch,
+            })
+        return signals
+
     try:
         r = requests.get("https://t.me/s/AOA_openTele", timeout=10,
                          headers={"User-Agent": "Mozilla/5.0"})
         html = r.text
 
-        # 메시지 텍스트 추출
         texts = re.findall(
             r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)</div>',
             html, re.DOTALL
         )
+        dates = re.findall(r'datetime="([^"]+)"', html)
+
         msgs = []
         for raw in texts[-limit:]:
-            # HTML 태그 제거
-            clean = re.sub(r"<[^>]+>", "", raw).strip()
-            clean = clean.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&#39;", "'").replace("&quot;", '"')
+            clean = re.sub(r"<br\s*/?>", "\n", raw)
+            clean = re.sub(r"<[^>]+>", "", clean).strip()
+            clean = (clean.replace("&amp;","&").replace("&lt;","<")
+                         .replace("&gt;",">").replace("&#39;","'").replace("&quot;",'"'))
             if clean:
                 msgs.append(clean)
 
-        # 날짜 추출
-        dates = re.findall(r'datetime="([^"]+)"', html)
-
         result = []
-        for i, msg in enumerate(msgs):
+        for i, text in enumerate(msgs):
             dt_str = dates[-(len(msgs)-i)] if len(dates) >= len(msgs)-i else ""
-            # 방향 파싱
-            direction = None
-            if re.search(r'롱|long|매수|상승|bull', msg, re.I): direction = "LONG"
-            if re.search(r'숏|short|매도|하락|bear', msg, re.I): direction = "SHORT"
-            # 가격 파싱
-            prices = [float(p.replace(",", "")) for p in re.findall(r'[\$]?\s*([\d,]{4,})', msg)]
+            signals = _extract_signals(text)
             result.append({
-                "text": msg[:300],
-                "direction": direction,
-                "prices": prices[:4],
+                "text":     text[:400],
+                "signals":  signals,
                 "datetime": dt_str,
             })
         return result
-    except Exception as e:
+    except Exception:
         return []
 
 
@@ -2576,26 +2633,11 @@ def render_swing_analysis(symbol, display, funding_rate):
     st.caption(f"시장 사이클: {cycle['label']} — {cycle_help}  ·  {bb_desc}  ·  신호 {swing['score']:+.0f}점")
 
     # ── 점수 상세
-    with st.expander("분석 근거 자세히 보기", expanded=False):
+    with st.expander("분석 근거 자세히 보기", expanded=True):
         st.caption("(+)는 롱 방향, (-)는 숏 방향 근거")
         for name, val in swing["details"]:
             color = "#5de8a0" if val > 0 else "#e85d5d"
             st.markdown(f"<span style='color:{color}'>{'+' if val>0 else ''}{val} &nbsp; {name}</span>", unsafe_allow_html=True)
-
-    st.divider()
-
-    # ── 전체 레벨 맵 (참고용)
-    if levels:
-        st.markdown("**전체 레벨 맵**")
-        rows = []
-        for lv in sorted(levels, key=lambda x: x["price"], reverse=True)[:8]:
-            dist = (lv["price"] - price) / price * 100
-            rows.append({
-                "가격": f"${lv['price']:,.0f}",
-                "위치": f"{'위' if dist > 0 else '아래'} {abs(dist):.1f}%",
-                "구분": f"{lv['tf']} {lv['type']}",
-            })
-        st.dataframe(rows, use_container_width=True, hide_index=True)
 
 
 # ══════════════════════════════════════════════
@@ -2793,34 +2835,58 @@ with tab_swing:
     with sw2:
         render_swing_analysis("ETH/USDT:USDT", "ETH", eth_fr)
     with sw3:
-        st.markdown("### 📣 워뇨띠 공개채널 최신 글")
-        st.caption("AOA_openTele 채널 · 5분 캐시")
+        st.markdown("### 📣 워뇨띠 공개채널")
+        st.caption("AOA_openTele · 5분 캐시 · 최신순")
         wonyo_msgs = fetch_wonyo_messages(limit=6)
         if not wonyo_msgs:
             st.warning("채널 글을 불러오지 못했습니다. 잠시 후 다시 시도해주세요.")
         else:
             for msg in reversed(wonyo_msgs):
-                dir_badge = ""
-                if msg["direction"] == "LONG":
-                    dir_badge = '<span style="background:#1a4a2e;color:#5de8a0;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700">📈 롱</span>'
-                elif msg["direction"] == "SHORT":
-                    dir_badge = '<span style="background:#4a1a1a;color:#e85d5d;border-radius:4px;padding:2px 8px;font-size:11px;font-weight:700">📉 숏</span>'
-
-                price_tags = ""
-                if msg["prices"]:
-                    price_tags = " · ".join(f"<code>${p:,.0f}</code>" for p in msg["prices"][:3])
-
+                sigs = msg.get("signals", [])
                 dt_str = msg["datetime"][:16].replace("T", " ") if msg["datetime"] else ""
+
+                # 신호 요약 HTML
+                sig_html = ""
+                for s in sigs:
+                    coin_str = s["coin"] or ""
+                    dir_str  = s["dir"]
+                    dir_color = "#5de8a0" if dir_str == "LONG" else "#e85d5d"
+                    dir_label = "📈 롱" if dir_str == "LONG" else "📉 숏"
+
+                    price_str = ""
+                    if s["price_from"] and s["price_to"]:
+                        price_str = f"${s['price_from']:,.0f} ~ ${s['price_to']:,.0f} 구간"
+                    elif s["extra_prices"]:
+                        price_str = " · ".join(f"${p:,.0f}" for p in s["extra_prices"][:3])
+
+                    switch_html = ""
+                    if s["switch"]:
+                        sw_color = "#5de8a0" if s["switch"] == "LONG" else "#e85d5d"
+                        sw_label = "📈 롱" if s["switch"] == "LONG" else "📉 숏"
+                        switch_html = f'<span style="color:#888"> → 이후 </span><span style="color:{sw_color};font-weight:700">{sw_label} 스위칭</span>'
+
+                    sig_html += f"""
+                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap;">
+                      <span style="background:{'#1a4a2e' if dir_str=='LONG' else '#4a1a1a'};color:{dir_color};
+                                   border-radius:4px;padding:3px 10px;font-size:12px;font-weight:700;">{dir_label}</span>
+                      {f'<span style="color:#aaa;font-size:12px;">{coin_str}</span>' if coin_str else ''}
+                      {f'<span style="color:#fff;font-size:13px;font-weight:600;">{price_str}</span>' if price_str else ''}
+                      {switch_html}
+                    </div>"""
+
+                # 원문 (접을 수 있게)
+                border_color = "rgba(255,255,255,0.08)"
+                if sigs:
+                    border_color = "#5de8a044" if sigs[0]["dir"] == "LONG" else "#e85d5d44"
 
                 st.markdown(f"""
                 <div style="background:rgba(255,255,255,0.03);border-radius:10px;
-                            padding:14px 16px;margin-bottom:10px;border:1px solid rgba(255,255,255,0.07);">
-                  <div style="display:flex;justify-content:space-between;margin-bottom:8px;align-items:center;">
-                    <div>{dir_badge}</div>
-                    <div style="font-size:10px;color:#555;">{dt_str}</div>
+                            padding:14px 16px;margin-bottom:10px;border:1px solid {border_color};">
+                  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:{'8px' if sig_html else '0'};">
+                    <div style="flex:1">{sig_html if sig_html else '<span style="color:#666;font-size:12px;">방향 신호 없음</span>'}</div>
+                    <div style="font-size:10px;color:#444;white-space:nowrap;margin-left:8px;">{dt_str}</div>
                   </div>
-                  <div style="font-size:13px;color:#ccc;white-space:pre-wrap;line-height:1.6;">{msg['text']}</div>
-                  {'<div style="margin-top:8px;font-size:11px;color:#888;">언급 가격: ' + price_tags + '</div>' if price_tags else ''}
+                  <div style="font-size:12px;color:#666;white-space:pre-wrap;line-height:1.6;border-top:{'1px solid rgba(255,255,255,0.05);padding-top:8px;margin-top:4px' if sig_html else 'none'};">{msg['text']}</div>
                 </div>
                 """, unsafe_allow_html=True)
 
