@@ -1065,10 +1065,9 @@ def detect_market_cycle(df_weekly, df_daily, price):
 
 
 def swing_score_engine(df_weekly, df_daily, df_3d, df_4h, price,
-                       funding_rate=None, manual_override=None):
+                       funding_rate=None):
     """
     스윙 방향 점수 엔진 (워뇨띠 방식 기반)
-    manual_override: {"direction":"bull"|"bear", "weight":1~3, "entry":float|None, "target":float|None}
     Returns: {"score": float, "direction": str, "details": list, "confidence": str}
     """
     sig = 0.0
@@ -1178,13 +1177,6 @@ def swing_score_engine(df_weekly, df_daily, df_3d, df_4h, price,
             sig += 1; log.append((f"펀딩비 극단 음수 {fr:.3f}% — 숏 스퀴즈 가능", +1))
         elif fr >= 0.03:
             sig -= 0.5; log.append((f"펀딩비 높음 {fr:.3f}% — 롱 과열 주의", -0))
-
-    # 11) 수동 분석 입력 (닮은꼴 대체) — 최대 ±3
-    if manual_override and manual_override.get("direction") in ("bull", "bear"):
-        w = manual_override.get("weight", 1)
-        delta = w if manual_override["direction"] == "bull" else -w
-        sig += delta
-        log.append((f"내 분석 입력 ({manual_override['direction'].upper()}, 확신도 {w}/3)", delta))
 
     # 방향 결정
     if sig >= 4:
@@ -2589,21 +2581,9 @@ def render_swing_analysis(symbol, display, funding_rate):
     price  = df_daily["close"].iloc[-1]
     change = (price - df_daily["close"].iloc[-2]) / df_daily["close"].iloc[-2] * 100
 
-    # ── 수동 입력 읽기
-    coin_key = "BTC" if "BTC" in symbol else "ETH"
-    _dir_raw = st.session_state.get(f"manual_dir_{coin_key}", "없음")
-    manual_override = None
-    if _dir_raw in ("롱", "숏"):
-        manual_override = {
-            "direction": "bull" if _dir_raw == "롱" else "bear",
-            "weight":    st.session_state.get(f"manual_weight_{coin_key}", 2),
-            "entry":     st.session_state.get(f"manual_entry_{coin_key}", 0) or None,
-            "target":    st.session_state.get(f"manual_target_{coin_key}", 0) or None,
-        }
-
     # ── 분석 실행
     swing  = swing_score_engine(df_weekly, df_daily, df_3d, df_4h, price,
-                                 funding_rate=funding_rate, manual_override=manual_override)
+                                 funding_rate=funding_rate)
     cycle  = swing["cycle"]
     bb_sq  = swing["bb_squeeze"]
     gaps   = detect_weekly_gaps(df_weekly, price)
@@ -2616,23 +2596,6 @@ def render_swing_analysis(symbol, display, funding_rate):
     dir_emoji = "📈" if is_bull else ("📉" if is_bear else "↔")
 
     plan = generate_swing_plan(swing["direction"], price, levels, gaps)
-
-    # 수동 입력으로 타점 오버라이드
-    if plan and manual_override:
-        if manual_override.get("entry"):
-            plan["entry_low"]  = manual_override["entry"] * 0.998
-            plan["entry_high"] = manual_override["entry"] * 1.002
-            plan["entry_msg"]  = "내 분석 진입가"
-        if manual_override.get("target"):
-            plan["tp1"]     = manual_override["target"]
-            plan["tp1_src"] = "내 분석 목표가"
-
-    # 수동 입력 배너
-    if manual_override:
-        w = manual_override["weight"]
-        conf_label = {1: "낮음", 2: "보통", 3: "높음"}.get(w, "")
-        dir_label  = "📈 롱" if manual_override["direction"] == "bull" else "📉 숏"
-        st.info(f"📝 내 분석 반영 중 — {dir_label}  확신도 {conf_label} (가중치 {w:+d}점)")
 
     # ══ 메인 타점 카드 ══
     if plan:
@@ -2854,27 +2817,6 @@ def render_sidebar():
         st.caption("Bybit USDT Perp · 60초 자동 갱신")
         st.divider()
 
-        # ── 수동 분석 입력 (닮은꼴 분석 대체)
-        st.markdown("### 📝 내 분석 입력")
-        st.caption("워뇨띠 채널 참고 또는 직접 분석한 방향을 입력하면 스윙 점수에 반영됩니다.")
-
-        for coin in ["BTC", "ETH"]:
-            with st.expander(f"{coin} 분석 입력", expanded=False):
-                key_dir    = f"manual_dir_{coin}"
-                key_entry  = f"manual_entry_{coin}"
-                key_target = f"manual_target_{coin}"
-                key_weight = f"manual_weight_{coin}"
-
-                st.radio("방향", ["없음", "롱", "숏"],
-                         key=key_dir, horizontal=True)
-                st.number_input("진입가 (선택)", min_value=0.0, step=100.0,
-                                key=key_entry, format="%.0f")
-                st.number_input("목표가 (선택)", min_value=0.0, step=100.0,
-                                key=key_target, format="%.0f")
-                st.slider("확신도", 1, 3, 2, key=key_weight,
-                          help="1=낮음, 2=보통, 3=높음 (점수 가중치에 반영)")
-
-        st.divider()
 
         fg_val, fg_label = fetch_fear_greed()
         if fg_val is not None:
