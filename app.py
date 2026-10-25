@@ -2556,7 +2556,29 @@ def generate_swing_plan(direction, price, levels, gaps):
         plan["message"] = " · ".join(msgs) if msgs else "저항 구간에서 숏 진입 유효"
 
     else:
-        return None
+        # neutral — 대기 조건 안내
+        watch_long  = below[0]["price"] if below else None
+        watch_short = above[0]["price"] if above else None
+        gap_t = None
+        if gap_above:   gap_t = ("위", gap_above[0]["center"])
+        elif gap_below: gap_t = ("아래", gap_below[0]["center"])
+
+        cues = []
+        if watch_long:
+            cues.append(f"${watch_long:,.0f} 지지 확인 → 롱 진입 검토 ({(watch_long-price)/price*100:+.1f}%)")
+        if watch_short:
+            cues.append(f"${watch_short:,.0f} 저항 돌파 실패 → 숏 진입 검토 ({(watch_short-price)/price*100:+.1f}%)")
+        if gap_t:
+            cues.append(f"주봉 빈공간 {gap_t[0]} ${gap_t[1]:,.0f} 방향으로 이탈 시 추세 확정")
+
+        plan = {
+            "direction": "neutral",
+            "price":     price,
+            "wait_cues": cues,
+            "watch_long":  watch_long,
+            "watch_short": watch_short,
+        }
+        return plan
 
     return plan
 
@@ -2650,14 +2672,31 @@ def render_swing_analysis(symbol, display, funding_rate):
         </div>
         """, unsafe_allow_html=True)
 
-    elif swing["direction"] == "neutral":
+    elif plan and plan.get("direction") == "neutral":
+        wait_cues = plan.get("wait_cues", [])
+        wl = plan.get("watch_long")
+        ws = plan.get("watch_short")
+
+        # 대기 레벨 설명 HTML
+        cue_items = "".join(
+            f'<li style="margin-bottom:8px;">{c}</li>' for c in wait_cues
+        ) if wait_cues else '<li style="color:#555;">레벨 데이터 부족</li>'
+
+        # 확인 방법 안내
+        tf_guide = ""
+        if wl:
+            tf_guide += f'<div style="margin-top:10px;font-size:12px;color:#888;">📌 <b style="color:#5de8a0;">${wl:,.0f}</b> — 4H 봉이 이 구간에서 긴 아랫꼬리 + 거래량 증가 시 롱 진입</div>'
+        if ws:
+            tf_guide += f'<div style="margin-top:6px;font-size:12px;color:#888;">📌 <b style="color:#e85d5d;">${ws:,.0f}</b> — 4H 봉이 이 구간에서 저항 후 음봉 마감 시 숏 진입</div>'
+
         st.markdown(f"""
         <div style="background:rgba(255,255,255,0.03);border-radius:14px;padding:20px 22px;
-                    border:1px solid #444;margin-bottom:14px;">
-          <div style="font-size:22px;font-weight:800;color:#aaa;">↔ 방향 불명확 — 관망</div>
-          <div style="font-size:13px;color:#777;margin-top:8px;">
-            상승·하락 신호가 혼재합니다. 명확한 방향이 잡힐 때까지 진입하지 마세요.
-          </div>
+                    border:1px solid #555;margin-bottom:14px;">
+          <div style="font-size:20px;font-weight:800;color:#aaa;margin-bottom:12px;">↔ 방향 불명확 — 아래 조건 확인 후 진입</div>
+          <ul style="color:#ccc;font-size:13px;line-height:1.8;padding-left:18px;margin:0;">
+            {cue_items}
+          </ul>
+          {tf_guide}
         </div>
         """, unsafe_allow_html=True)
 
