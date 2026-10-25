@@ -170,10 +170,16 @@ def fetch_wonyo_messages(limit=6):
                     single_prices.append(v)
             except: pass
 
-        # 1차 방향
+        # 1차 방향 — 먼저 등장하는 키워드 기준
         dir1 = None
-        if re.search(r'숏|공매도|short', text, re.I): dir1 = "SHORT"
-        elif re.search(r'롱|매수|long', text, re.I): dir1 = "LONG"
+        m_short = re.search(r'숏|공매도|short', text, re.I)
+        m_long  = re.search(r'롱|매수|long',    text, re.I)
+        if m_short and m_long:
+            dir1 = "SHORT" if m_short.start() < m_long.start() else "LONG"
+        elif m_short:
+            dir1 = "SHORT"
+        elif m_long:
+            dir1 = "LONG"
 
         # 스위칭 방향
         switch = None
@@ -2845,6 +2851,71 @@ def render_sidebar():
             for ev in high_events[:3]:
                 st.caption(f"🔴 {ev['date']} {ev['time']} {ev['title']}")
 
+        st.divider()
+        st.markdown("**📣 워뇨띠 최신글**")
+
+        import html as _html
+        wonyo_msgs = fetch_wonyo_messages(limit=8)
+        # 신호가 있는 가장 최근 메시지 우선, 없으면 그냥 최신
+        latest = None
+        for m in reversed(wonyo_msgs):
+            if m.get("signals"):
+                latest = m
+                break
+        if latest is None and wonyo_msgs:
+            latest = wonyo_msgs[-1]
+
+        if not latest:
+            st.caption("불러오기 실패")
+        else:
+            sigs = latest.get("signals", [])
+            dt_str = latest["datetime"][:16].replace("T", " ") if latest["datetime"] else ""
+            if dt_str:
+                st.caption(dt_str)
+
+            if sigs:
+                s = sigs[0]
+                dir_str   = s["dir"]
+                dir_color = "#5de8a0" if dir_str == "LONG" else "#e85d5d"
+                dir_bg    = "#1a4a2e"  if dir_str == "LONG" else "#4a1a1a"
+                dir_label = "📈 롱"    if dir_str == "LONG" else "📉 숏"
+                coin_str  = s["coin"] or ""
+
+                if s["price_from"] and s["price_to"]:
+                    price_str = f"${s['price_from']:,.0f}~${s['price_to']:,.0f}"
+                elif s["extra_prices"]:
+                    price_str = " · ".join(f"${p:,.0f}" for p in s["extra_prices"][:2])
+                else:
+                    price_str = ""
+
+                switch_html = ""
+                if s["switch"]:
+                    sw_color = "#5de8a0" if s["switch"] == "LONG" else "#e85d5d"
+                    sw_label = "📈 롱" if s["switch"] == "LONG" else "📉 숏"
+                    switch_html = (f'<div style="margin-top:4px;font-size:11px;color:#888;">'
+                                   f'→ 이후 <span style="color:{sw_color};font-weight:700">{sw_label} 스위칭</span></div>')
+
+                price_html = (f'<br><span style="color:#fff;font-size:13px;font-weight:600;">{price_str}</span>'
+                              if price_str else
+                              '<br><span style="color:#666;font-size:11px;">타점 정보 없음</span>')
+                coin_html  = ("  " + coin_str) if coin_str else ""
+                st.markdown(
+                    f'<div style="background:{dir_bg};border-radius:8px;padding:10px 12px;margin-bottom:6px;">'
+                    f'<span style="color:{dir_color};font-size:14px;font-weight:800;">{dir_label}</span>'
+                    f'{coin_html}{price_html}{switch_html}'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
+            else:
+                st.markdown('<div style="color:#666;font-size:12px;">방향/타점 정보 없음</div>',
+                            unsafe_allow_html=True)
+
+            safe_text = _html.escape(latest["text"]).replace("\n", "<br>")
+            st.markdown(
+                f'<div style="font-size:11px;color:#555;line-height:1.6;margin-top:6px;">{safe_text}</div>',
+                unsafe_allow_html=True
+            )
+
 
 # ══════════════════════════════════════════════
 # 진입점
@@ -2867,78 +2938,11 @@ eth_fr = fetch_funding("ETH/USDT:USDT")
 tab_swing, tab_trade, tab_market = st.tabs(["📊 스윙 분석", "⚡ 단타 분석", "📊 시장 개요"])
 
 with tab_swing:
-    sw1, sw2, sw3 = st.tabs(["₿ BTC", "Ξ ETH", "📣 워뇨띠 채널"])
+    sw1, sw2 = st.tabs(["₿ BTC", "Ξ ETH"])
     with sw1:
         render_swing_analysis("BTC/USDT:USDT", "BTC", btc_fr)
     with sw2:
         render_swing_analysis("ETH/USDT:USDT", "ETH", eth_fr)
-    with sw3:
-        st.markdown("### 📣 워뇨띠 공개채널")
-        st.caption("AOA_openTele · 5분 캐시 · 최신순")
-        wonyo_msgs = fetch_wonyo_messages(limit=6)
-        if not wonyo_msgs:
-            st.warning("채널 글을 불러오지 못했습니다. 잠시 후 다시 시도해주세요.")
-        else:
-            import html as _html
-            for msg in reversed(wonyo_msgs):
-                sigs = msg.get("signals", [])
-                dt_str = msg["datetime"][:16].replace("T", " ") if msg["datetime"] else ""
-
-                # 신호 요약 — 순수 st 컴포넌트로 렌더 (HTML injection 방지)
-                border_color = "rgba(255,255,255,0.08)"
-                if sigs:
-                    border_color = "#5de8a044" if sigs[0]["dir"] == "LONG" else "#e85d5d44"
-
-                st.markdown(f'<div style="border:1px solid {border_color};border-radius:10px;'
-                            f'padding:14px 16px;margin-bottom:10px;background:rgba(255,255,255,0.03);">',
-                            unsafe_allow_html=True)
-
-                # 날짜
-                if dt_str:
-                    st.caption(dt_str)
-
-                # 신호 배지
-                for s in sigs:
-                    dir_str   = s["dir"]
-                    dir_color = "#5de8a0" if dir_str == "LONG" else "#e85d5d"
-                    dir_bg    = "#1a4a2e"  if dir_str == "LONG" else "#4a1a1a"
-                    dir_label = "📈 롱"    if dir_str == "LONG" else "📉 숏"
-                    coin_str  = s["coin"] or ""
-
-                    price_str = ""
-                    if s["price_from"] and s["price_to"]:
-                        price_str = f"  ${s['price_from']:,.0f} ~ ${s['price_to']:,.0f}"
-                    elif s["extra_prices"]:
-                        price_str = "  " + " · ".join(f"${p:,.0f}" for p in s["extra_prices"][:3])
-
-                    switch_str = ""
-                    if s["switch"]:
-                        sw_label = "📈 롱" if s["switch"] == "LONG" else "📉 숏"
-                        sw_color = "#5de8a0" if s["switch"] == "LONG" else "#e85d5d"
-                        switch_str = (f'&nbsp;&nbsp;<span style="color:#888">→ 이후</span>&nbsp;'
-                                      f'<span style="color:{sw_color};font-weight:700">{sw_label} 스위칭</span>')
-
-                    st.markdown(
-                        f'<div style="margin-bottom:6px;">'
-                        f'<span style="background:{dir_bg};color:{dir_color};border-radius:4px;'
-                        f'padding:3px 10px;font-size:12px;font-weight:700;">{dir_label}</span>'
-                        f'&nbsp;<span style="color:#aaa;font-size:12px;">{coin_str}</span>'
-                        f'<span style="color:#fff;font-size:13px;font-weight:600;">{price_str}</span>'
-                        f'{switch_str}</div>',
-                        unsafe_allow_html=True
-                    )
-
-                if not sigs:
-                    st.caption("방향 신호 없음")
-
-                # 원문 — HTML escape 후 출력
-                safe_text = _html.escape(msg["text"]).replace("\n", "<br>")
-                st.markdown(
-                    f'<div style="font-size:12px;color:#888;margin-top:8px;line-height:1.7;">{safe_text}</div>',
-                    unsafe_allow_html=True
-                )
-
-                st.markdown("</div>", unsafe_allow_html=True)
 
 with tab_trade:
     # Macro warning
